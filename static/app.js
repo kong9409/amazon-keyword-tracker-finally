@@ -104,9 +104,15 @@ async function refreshHistory() {
           <td>${escapeHtml(record.date || "")}</td>
           <td>${escapeHtml(record.asin || "")}</td>
           <td>${escapeHtml(record.keyword || "")}</td>
+          <td>${escapeHtml(record.traffic_share || "")}</td>
+          <td>${escapeHtml(record.aba_rank || "")}</td>
+          <td>${escapeHtml(record.search_volume || "")}</td>
           <td>${escapeHtml(record.organic_position || "")}</td>
           <td>${escapeHtml(record.ad_position || "")}</td>
           <td>${escapeHtml(record.price || "")}</td>
+          <td>${escapeHtml(record.coupon_value || "")}</td>
+          <td>${escapeHtml(record.deal_price || "")}</td>
+          <td>${escapeHtml(record.prime_discount_price || "")}</td>
           <td>${escapeHtml(record.estimated_sales || "")}</td>
           <td>${escapeHtml(record.product_rank || "")}</td>
           <td>${escapeHtml(record.rating || "")}</td>
@@ -271,7 +277,7 @@ async function boot() {
   try {
     const health = await fetch("/api/health", { cache: "no-store" });
     sourceBadge.textContent = health.ok
-      ? "服务已连接，输出自然位、广告位、价格、销量、排名、评分和评价数。"
+      ? "服务已连接，输出自然位、广告位、ABA热度、搜索量、流量占比、价格、优惠券、秒杀、Prime折扣、销量、排名、评分和评价数。"
       : "服务启动异常，请检查 Zeabur Runtime Logs。";
   } catch (_error) {
     sourceBadge.textContent = "后端服务暂不可用，请检查 Zeabur Runtime Logs。";

@@ -33,7 +33,15 @@ class DemoSorftimeClient:
         rank = (number % 120) + 1
         return {
             "keyword_rank": rank if rank <= 100 else ">100",
+            "traffic_share": f"{(number % 280) / 10:.1f}%",
+            "aba_rank": 1000 + (number % 90000),
+            "search_volume": 500 + (number % 40000),
             "price": round(11 + (number % 9000) / 100, 2),
+            "coupon_type": "",
+            "coupon_value": "",
+            "deal_status": "否",
+            "deal_price": "",
+            "prime_discount_price": "",
             "estimated_sales": 20 + (number % 480),
             "product_rank": 500 + (number % 19000),
             "status": "demo",
@@ -115,7 +123,15 @@ class SorftimeMcpClient:
         ad_position = traffic_match.get("最近广告曝光位置", "")
         fallback_rank = extract_keyword_rank(ranking)
         keyword_rank = first_non_empty(organic_position, ad_position, fallback_rank)
+        traffic_share = first_non_empty(find_value(traffic_match, TRAFFIC_SHARE_KEYS), find_value(ranking, TRAFFIC_SHARE_KEYS))
+        aba_rank = first_non_empty(find_value(traffic_match, ABA_RANK_KEYS), find_value(ranking, ABA_RANK_KEYS))
+        search_volume = first_non_empty(find_value(traffic_match, SEARCH_VOLUME_KEYS), find_value(ranking, SEARCH_VOLUME_KEYS))
         price_value = first_non_empty(detail_metrics.get("price"), extract_latest_number(price), find_value(detail, PRICE_KEYS))
+        coupon_value = first_non_empty(detail_metrics.get("coupon_value"), find_value(detail, COUPON_KEYS), find_value(price, COUPON_KEYS))
+        coupon_type = first_non_empty(detail_metrics.get("coupon_type"), classify_coupon(coupon_value))
+        deal_price = first_non_empty(detail_metrics.get("deal_price"), find_value(detail, DEAL_PRICE_KEYS), find_value(price, DEAL_PRICE_KEYS))
+        deal_status = first_non_empty(detail_metrics.get("deal_status"), find_value(detail, DEAL_STATUS_KEYS), "是" if deal_price else "否")
+        prime_discount_price = first_non_empty(detail_metrics.get("prime_discount_price"), find_value(detail, PRIME_PRICE_KEYS), find_value(price, PRIME_PRICE_KEYS))
         sales_value = first_non_empty(detail_metrics.get("estimated_sales"), extract_latest_number(sales), find_value(detail, SALES_KEYS))
         rank_value = first_non_empty(detail_metrics.get("product_rank"), extract_latest_number(product_rank), find_value(detail, RANK_KEYS))
         rating = first_non_empty(detail_metrics.get("rating"), find_value(detail, RATING_KEYS))
@@ -149,6 +165,14 @@ class SorftimeMcpClient:
             price_value = first_non_empty(price_value, find_value(cli_detail, PRICE_KEYS))
             sales_value = first_non_empty(sales_value, find_value(cli_detail, SALES_KEYS))
             rank_value = first_non_empty(rank_value, find_value(cli_detail, RANK_KEYS))
+            traffic_share = first_non_empty(traffic_share, find_value(cli_keyword, TRAFFIC_SHARE_KEYS))
+            aba_rank = first_non_empty(aba_rank, find_value(cli_keyword, ABA_RANK_KEYS))
+            search_volume = first_non_empty(search_volume, find_value(cli_keyword, SEARCH_VOLUME_KEYS))
+            coupon_value = first_non_empty(coupon_value, find_value(cli_detail, COUPON_KEYS))
+            coupon_type = first_non_empty(coupon_type, classify_coupon(coupon_value))
+            deal_price = first_non_empty(deal_price, find_value(cli_detail, DEAL_PRICE_KEYS))
+            deal_status = first_non_empty(deal_status, find_value(cli_detail, DEAL_STATUS_KEYS), "是" if deal_price else "否")
+            prime_discount_price = first_non_empty(prime_discount_price, find_value(cli_detail, PRIME_PRICE_KEYS))
             rating = first_non_empty(rating, find_value(cli_detail, RATING_KEYS))
             review_count = first_non_empty(review_count, find_value(cli_detail, REVIEW_KEYS))
         else:
@@ -157,7 +181,7 @@ class SorftimeMcpClient:
 
         found_any = any(
             value not in (None, "", [], {})
-            for value in (keyword_rank, organic_position, ad_position, price_value, sales_value, rank_value, rating, review_count)
+            for value in (keyword_rank, organic_position, ad_position, traffic_share, aba_rank, search_volume, price_value, coupon_value, deal_price, prime_discount_price, sales_value, rank_value, rating, review_count)
         )
 
         return {
@@ -166,7 +190,15 @@ class SorftimeMcpClient:
             "organic_time": organic_time,
             "ad_position": ad_position,
             "ad_time": ad_time,
+            "traffic_share": traffic_share,
+            "aba_rank": aba_rank,
+            "search_volume": search_volume,
             "price": price_value,
+            "coupon_type": coupon_type,
+            "coupon_value": coupon_value,
+            "deal_status": deal_status,
+            "deal_price": deal_price,
+            "prime_discount_price": prime_discount_price,
             "estimated_sales": sales_value,
             "product_rank": rank_value,
             "rating": rating,
@@ -314,7 +346,15 @@ def normalize_external_result(data: dict[str, Any]) -> dict[str, Any]:
         "organic_time": first_value(data, "organic_time", "natural_time"),
         "ad_position": first_value(data, "ad_position", "ads_position", "adRank"),
         "ad_time": first_value(data, "ad_time", "ads_time"),
+        "traffic_share": first_value(data, "traffic_share", "flow_share", "trafficShare", "click_share"),
+        "aba_rank": first_value(data, "aba_rank", "abaRank", "aba_search_frequency_rank", "search_frequency_rank"),
+        "search_volume": first_value(data, "search_volume", "searchVolume", "monthly_search_volume"),
         "price": first_value(data, "price", "current_price", "buybox_price"),
+        "coupon_type": first_value(data, "coupon_type", "couponType"),
+        "coupon_value": first_value(data, "coupon_value", "coupon", "couponValue"),
+        "deal_status": first_value(data, "deal_status", "is_deal", "dealStatus"),
+        "deal_price": first_value(data, "deal_price", "lightning_deal_price", "dealPrice"),
+        "prime_discount_price": first_value(data, "prime_discount_price", "prime_price", "primePrice"),
         "estimated_sales": first_value(data, "estimated_sales", "sales", "monthly_sales", "daily_sales"),
         "product_rank": first_value(data, "product_rank", "bsr", "best_seller_rank", "category_rank"),
         "rating": first_value(data, "rating", "link_rating", "review_rating"),
@@ -382,6 +422,14 @@ def capture_batch(
                 result = {
                     "keyword_rank": "",
                     "price": "",
+                    "traffic_share": "",
+                    "aba_rank": "",
+                    "search_volume": "",
+                    "coupon_type": "",
+                    "coupon_value": "",
+                    "deal_status": "",
+                    "deal_price": "",
+                    "prime_discount_price": "",
                     "estimated_sales": "",
                     "product_rank": "",
                     "status": "failed",
@@ -400,7 +448,15 @@ def capture_batch(
                     "organic_time": result.get("organic_time", ""),
                     "ad_position": result.get("ad_position", ""),
                     "ad_time": result.get("ad_time", ""),
+                    "traffic_share": result.get("traffic_share", ""),
+                    "aba_rank": result.get("aba_rank", ""),
+                    "search_volume": result.get("search_volume", ""),
                     "price": result.get("price", ""),
+                    "coupon_type": result.get("coupon_type", ""),
+                    "coupon_value": result.get("coupon_value", ""),
+                    "deal_status": result.get("deal_status", ""),
+                    "deal_price": result.get("deal_price", ""),
+                    "prime_discount_price": result.get("prime_discount_price", ""),
                     "estimated_sales": result.get("estimated_sales", ""),
                     "product_rank": result.get("product_rank", ""),
                     "rating": result.get("rating", ""),
@@ -421,6 +477,32 @@ def normalize_marketplace(marketplace: str) -> str:
         return "GB"
     return value
 
+
+TRAFFIC_SHARE_KEYS = {
+    "关键词流量占比", "流量占比", "流量占比%", "点击份额", "点击占比", "traffic_share",
+    "trafficShare", "flowShare", "flow_share", "clickShare", "click_share", "share", "占比",
+}
+ABA_RANK_KEYS = {
+    "ABA热度排名", "ABA排名", "ABA", "ABA Rank", "aba_rank", "abaRank",
+    "searchFrequencyRank", "search_frequency_rank", "SearchFrequencyRank", "关键词热度排名",
+}
+SEARCH_VOLUME_KEYS = {
+    "搜索量", "月搜索量", "关键词搜索量", "search_volume", "searchVolume",
+    "monthly_search_volume", "MonthlySearchVolume", "SearchVolume",
+}
+COUPON_KEYS = {
+    "优惠券", "coupon", "Coupon", "couponValue", "coupon_value", "couponAmount",
+    "CouponAmount", "couponDiscount", "优惠券金额", "优惠券折扣",
+}
+DEAL_STATUS_KEYS = {"是否秒杀", "秒杀", "deal", "isDeal", "is_deal", "dealStatus", "DealStatus", "促销状态"}
+DEAL_PRICE_KEYS = {
+    "秒杀价格", "秒杀价", "lightningDealPrice", "lightning_deal_price",
+    "dealPrice", "DealPrice", "flashDealPrice", "促销价",
+}
+PRIME_PRICE_KEYS = {
+    "Prime专享价", "Prime价格", "Prime折扣价", "primePrice", "prime_price",
+    "prime_discount_price", "PrimeDiscountPrice", "primeExclusivePrice",
+}
 
 PRICE_KEYS = {
     "price",
@@ -496,8 +578,17 @@ DATE_KEYS = {"date", "time", "recordDate", "captureDate", "exposureTime", "statD
 
 def parse_product_detail(detail: Any) -> dict[str, Any]:
     text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
+    coupon_value = first_non_empty(
+        regex_first_text(text, r"优惠券[:：]\s*([^,，;；\n]+)"),
+        regex_first_text(text, r"coupon[:：]\s*([^,，;；\n]+)"),
+    )
     return {
         "price": regex_first(text, r"价格：([0-9]+(?:\.[0-9]+)?)"),
+        "coupon_value": coupon_value,
+        "coupon_type": classify_coupon(coupon_value),
+        "deal_status": first_non_empty(regex_first_text(text, r"是否秒杀[:：]\s*([^,，;；\n]+)"), "是" if regex_first(text, r"秒杀(?:价格|价)?[:：]\s*([0-9]+(?:\.[0-9]+)?)") else ""),
+        "deal_price": regex_first(text, r"秒杀(?:价格|价)?[:：]\s*([0-9]+(?:\.[0-9]+)?)"),
+        "prime_discount_price": regex_first(text, r"Prime(?:专享价|价格|折扣价)[:：]\s*([0-9]+(?:\.[0-9]+)?)"),
         "rating": regex_first(text, r"星级：([0-9]+(?:\.[0-9]+)?)"),
         "review_count": regex_first(text, r"评论数：([0-9,]+)"),
         "estimated_sales": regex_first(text, r"月销量：(?:月销量：)?([0-9,]+)"),
@@ -510,6 +601,24 @@ def regex_first(text: str, pattern: str) -> str:
     if not match:
         return ""
     return match.group(1).replace(",", "")
+
+
+def regex_first_text(text: str, pattern: str) -> str:
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def classify_coupon(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    text = str(value)
+    if "%" in text or "percent" in text.lower() or "折" in text:
+        return "百分比"
+    if re.search(r"[$€£￥¥]|\bUSD\b|\bEUR\b|\bGBP\b|\d+(?:\.\d+)?\s*(?:off|减|元)", text, re.I):
+        return "金额"
+    return "其他"
 
 
 def amazon_product_url(asin: str, site: str) -> str:

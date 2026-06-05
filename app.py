@@ -41,12 +41,20 @@ FIELD_COLUMNS = [
     ("marketplace", "站点"),
     ("asin", "ASIN"),
     ("keyword", "关键词"),
+    ("traffic_share", "关键词流量占比"),
+    ("aba_rank", "ABA热度排名"),
+    ("search_volume", "搜索量"),
     ("organic_position", "最近自然位置"),
     ("organic_time", "自然曝光时间"),
     ("ad_position", "最近广告位置"),
     ("ad_time", "广告曝光时间"),
     ("keyword_rank", "最新曝光位置"),
     ("price", "当前价格"),
+    ("coupon_type", "优惠券类型"),
+    ("coupon_value", "优惠券优惠"),
+    ("deal_status", "是否秒杀"),
+    ("deal_price", "秒杀价格"),
+    ("prime_discount_price", "Prime专享价/折扣价"),
     ("estimated_sales", "月销量"),
     ("product_rank", "大类排名"),
     ("rating", "链接评分"),
@@ -63,6 +71,14 @@ DB_CAPTURE_COLUMNS = {
     "organic_time": "TEXT",
     "ad_position": "TEXT",
     "ad_time": "TEXT",
+    "aba_rank": "TEXT",
+    "search_volume": "TEXT",
+    "traffic_share": "TEXT",
+    "coupon_type": "TEXT",
+    "coupon_value": "TEXT",
+    "deal_status": "TEXT",
+    "deal_price": "TEXT",
+    "prime_discount_price": "TEXT",
     "rating": "TEXT",
     "review_count": "TEXT",
     "product_url": "TEXT",
@@ -89,7 +105,15 @@ def ensure_storage() -> None:
                 organic_time TEXT,
                 ad_position TEXT,
                 ad_time TEXT,
+                aba_rank TEXT,
+                search_volume TEXT,
+                traffic_share TEXT,
                 price TEXT,
+                coupon_type TEXT,
+                coupon_value TEXT,
+                deal_status TEXT,
+                deal_price TEXT,
+                prime_discount_price TEXT,
                 estimated_sales TEXT,
                 product_rank TEXT,
                 rating TEXT,
@@ -172,6 +196,25 @@ def decode_text_file(data: bytes) -> str:
     return data.decode("utf-8", errors="ignore")
 
 
+
+def traffic_share_number(value: Any) -> float:
+    if value in (None, ""):
+        return -1.0
+    text = str(value).strip().replace(",", "")
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        return -1.0
+    number = float(match.group(0))
+    return number / 100 if "%" in text and number > 1 else number
+
+
+def sort_records_by_traffic_share(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        records,
+        key=lambda item: (traffic_share_number(item.get("traffic_share")), str(item.get("asin", "")), str(item.get("keyword", ""))),
+        reverse=True,
+    )
+
 def make_workbook(records: list[dict[str, Any]]) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
@@ -179,12 +222,13 @@ def make_workbook(records: list[dict[str, Any]]) -> bytes:
     headers = [label for _, label in FIELD_COLUMNS]
     sheet.append(headers)
 
-    for record in records:
+    for record in sort_records_by_traffic_share(records):
         sheet.append([record.get(key, "") for key, _ in FIELD_COLUMNS])
 
-    widths = [12, 20, 10, 16, 28, 18, 20, 18, 20, 16, 12, 12, 14, 12, 12, 42, 14, 12, 32]
+    widths = [12, 20, 10, 16, 28, 16, 14, 12, 18, 20, 18, 20, 16, 12, 14, 18, 12, 12, 18, 12, 14, 12, 12, 42, 14, 12, 42]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[sheet.cell(1, index).column_letter].width = width
+    sheet.freeze_panes = "A2"
     apply_excel_style(sheet, "1F6F78")
 
     stream = BytesIO()
@@ -213,7 +257,7 @@ def make_template(kind: str) -> bytes:
 def apply_excel_style(sheet: Any, header_color: str) -> None:
     default_font = Font(name=EXCEL_FONT_NAME, size=EXCEL_FONT_SIZE)
     header_font = Font(name=EXCEL_FONT_NAME, size=EXCEL_FONT_SIZE, bold=True, color="FFFFFF")
-    default_alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    default_alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
     header_fill = PatternFill("solid", fgColor=header_color)
 
     for row in sheet.iter_rows():
@@ -234,11 +278,12 @@ def save_records(records: list[dict[str, Any]]) -> None:
             """
             INSERT INTO captures (
                 owner_id, date, captured_at, marketplace, asin, keyword, keyword_rank,
-                organic_position, organic_time, ad_position, ad_time, price,
-                estimated_sales, product_rank, rating, review_count, product_url,
-                source, status, message, raw_json
+                organic_position, organic_time, ad_position, ad_time, aba_rank, search_volume,
+                traffic_share, price, coupon_type, coupon_value, deal_status, deal_price,
+                prime_discount_price, estimated_sales, product_rank, rating, review_count,
+                product_url, source, status, message, raw_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -253,7 +298,15 @@ def save_records(records: list[dict[str, Any]]) -> None:
                     str(record.get("organic_time", "")),
                     str(record.get("ad_position", "")),
                     str(record.get("ad_time", "")),
+                    str(record.get("aba_rank", "")),
+                    str(record.get("search_volume", "")),
+                    str(record.get("traffic_share", "")),
                     str(record.get("price", "")),
+                    str(record.get("coupon_type", "")),
+                    str(record.get("coupon_value", "")),
+                    str(record.get("deal_status", "")),
+                    str(record.get("deal_price", "")),
+                    str(record.get("prime_discount_price", "")),
                     str(record.get("estimated_sales", "")),
                     str(record.get("product_rank", "")),
                     str(record.get("rating", "")),
@@ -277,10 +330,11 @@ def latest_history(owner_id: str, limit: int = 100) -> list[dict[str, Any]]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT date, captured_at, marketplace, asin, keyword, keyword_rank, price,
-                   organic_position, organic_time, ad_position, ad_time,
-                   estimated_sales, product_rank, rating, review_count, product_url,
-                   source, status, message
+            SELECT date, captured_at, marketplace, asin, keyword, keyword_rank,
+                   traffic_share, aba_rank, search_volume, price, coupon_type, coupon_value,
+                   deal_status, deal_price, prime_discount_price, organic_position, organic_time,
+                   ad_position, ad_time, estimated_sales, product_rank, rating, review_count,
+                   product_url, source, status, message
             FROM captures
             WHERE owner_id = ?
             ORDER BY id DESC
@@ -382,6 +436,7 @@ def run_capture(payload: dict[str, Any]) -> list[dict[str, Any]]:
     )
     for record in records:
         record["owner_id"] = payload.get("owner_id", "")
+    records = sort_records_by_traffic_share(records)
     save_records(records)
     return records
 
@@ -461,6 +516,14 @@ def run_capture_with_progress(job_id: str, payload: dict[str, Any]) -> None:
                         "ad_position": "",
                         "ad_time": "",
                         "price": "",
+                        "aba_rank": "",
+                        "search_volume": "",
+                        "traffic_share": "",
+                        "coupon_type": "",
+                        "coupon_value": "",
+                        "deal_status": "",
+                        "deal_price": "",
+                        "prime_discount_price": "",
                         "estimated_sales": "",
                         "product_rank": "",
                         "rating": "",
@@ -483,7 +546,15 @@ def run_capture_with_progress(job_id: str, payload: dict[str, Any]) -> None:
                         "organic_time": result.get("organic_time", ""),
                         "ad_position": result.get("ad_position", ""),
                         "ad_time": result.get("ad_time", ""),
+                        "aba_rank": result.get("aba_rank", ""),
+                        "search_volume": result.get("search_volume", ""),
+                        "traffic_share": result.get("traffic_share", ""),
                         "price": result.get("price", ""),
+                        "coupon_type": result.get("coupon_type", ""),
+                        "coupon_value": result.get("coupon_value", ""),
+                        "deal_status": result.get("deal_status", ""),
+                        "deal_price": result.get("deal_price", ""),
+                        "prime_discount_price": result.get("prime_discount_price", ""),
                         "estimated_sales": result.get("estimated_sales", ""),
                         "product_rank": result.get("product_rank", ""),
                         "rating": result.get("rating", ""),
@@ -501,6 +572,7 @@ def run_capture_with_progress(job_id: str, payload: dict[str, Any]) -> None:
         job.update({"status": "saving", "percent": 88})
         append_job_log(job, "正在保存历史记录并生成输出文件。")
         write_job(job)
+        records = sort_records_by_traffic_share(records)
         save_records(records)
 
         output_name = ""
@@ -680,7 +752,15 @@ class KeywordTrackerHandler(BaseHTTPRequestHandler):
                         "ad_position": "测试广告位置",
                         "ad_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
                         "keyword_rank": "测试曝光位置",
+                        "traffic_share": "12.5%",
+                        "aba_rank": "3456",
+                        "search_volume": "18000",
                         "price": "99.99",
+                        "coupon_type": "金额",
+                        "coupon_value": "$10 off",
+                        "deal_status": "否",
+                        "deal_price": "",
+                        "prime_discount_price": "89.99",
                         "estimated_sales": "120",
                         "product_rank": "12345",
                         "rating": "4.6",

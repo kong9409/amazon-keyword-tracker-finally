@@ -10,7 +10,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
-COPY app.py launcher.py lark_writer.py sorftime_adapter.py ./
+COPY app.py lark_writer.py sorftime_adapter.py ./
 COPY static ./static
 
 RUN mkdir -p data exports data/jobs
