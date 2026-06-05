@@ -19,6 +19,7 @@ const progressPct = document.querySelector("#progressPct");
 const progressFill = document.querySelector("#progressFill");
 const logBox = document.querySelector("#logBox");
 const resultLinks = document.querySelector("#resultLinks");
+const OWNER_KEY = "amazonKeywordTrackerOwnerId";
 
 const MARKETPLACES = {
   US: { name: "Amazon US", domain: "https://www.amazon.com", postal: "10001 / New York", hint: "默认地区：New York, NY。" },
@@ -49,6 +50,24 @@ function activeOutputMode() {
   return new FormData(form).get("outputMode");
 }
 
+function getOwnerId() {
+  let ownerId = localStorage.getItem(OWNER_KEY);
+  if (!ownerId) {
+    const randomPart = crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    ownerId = `kwt_${randomPart.replace(/[^A-Za-z0-9_-]/g, "")}`;
+    localStorage.setItem(OWNER_KEY, ownerId);
+  }
+  return ownerId;
+}
+
+function captureFormData() {
+  const data = new FormData(form);
+  data.set("owner_id", getOwnerId());
+  return data;
+}
+
 function syncDeliveryFields() {
   larkFields.hidden = activeOutputMode() === "excel";
 }
@@ -74,7 +93,7 @@ function setProgress(percent, title, sub, log) {
 }
 
 async function refreshHistory() {
-  const response = await fetch("/api/history");
+  const response = await fetch(`/api/history?owner_id=${encodeURIComponent(getOwnerId())}`);
   const data = await response.json();
   const records = data.records || [];
   historyBody.innerHTML = records
@@ -134,7 +153,7 @@ form.addEventListener("submit", async (event) => {
   try {
     const response = await fetch("/api/capture", {
       method: "POST",
-      body: new FormData(form),
+      body: captureFormData(),
     });
     const contentType = response.headers.get("Content-Type") || "";
 
@@ -190,7 +209,7 @@ saveDailyButton.addEventListener("click", async () => {
   try {
     const response = await fetch("/api/daily", {
       method: "POST",
-      body: new FormData(form),
+      body: captureFormData(),
     });
     const data = await response.json();
     if (!data.ok) throw new Error(data.error || "保存失败");

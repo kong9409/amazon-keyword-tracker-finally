@@ -4,6 +4,7 @@ import cgi
 import json
 import mimetypes
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -55,6 +56,7 @@ FIELD_COLUMNS = [
 ]
 
 DB_CAPTURE_COLUMNS = {
+    "owner_id": "TEXT",
     "organic_position": "TEXT",
     "organic_time": "TEXT",
     "ad_position": "TEXT",
@@ -73,6 +75,7 @@ def ensure_storage() -> None:
             """
             CREATE TABLE IF NOT EXISTS captures (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id TEXT,
                 date TEXT NOT NULL,
                 captured_at TEXT NOT NULL,
                 marketplace TEXT NOT NULL,
@@ -105,6 +108,9 @@ def ensure_storage() -> None:
                 conn.execute(f"ALTER TABLE captures ADD COLUMN {column} {column_type}")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_captures_date ON captures(date, asin, keyword)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_captures_owner ON captures(owner_id, id)"
         )
 
 
@@ -224,15 +230,16 @@ def save_records(records: list[dict[str, Any]]) -> None:
         conn.executemany(
             """
             INSERT INTO captures (
-                date, captured_at, marketplace, asin, keyword, keyword_rank,
+                owner_id, date, captured_at, marketplace, asin, keyword, keyword_rank,
                 organic_position, organic_time, ad_position, ad_time, price,
                 estimated_sales, product_rank, rating, review_count, product_url,
                 source, status, message, raw_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
+                    record.get("owner_id", ""),
                     record.get("date", ""),
                     record.get("captured_at", ""),
                     record.get("marketplace", ""),
@@ -259,7 +266,10 @@ def save_records(records: list[dict[str, Any]]) -> None:
         )
 
 
-def latest_history(limit: int = 100) -> list[dict[str, Any]]:
+def latest_history(owner_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    owner_id = sanitize_owner_id(owner_id)
+    if not owner_id:
+        return []
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
@@ -269,12 +279,18 @@ def latest_history(limit: int = 100) -> list[dict[str, Any]]:
                    estimated_sales, product_rank, rating, review_count, product_url,
                    source, status, message
             FROM captures
+            WHERE owner_id = ?
             ORDER BY id DESC
             LIMIT ?
             """,
-            (limit,),
+            (owner_id, limit),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def sanitize_owner_id(value: str) -> str:
+    value = (value or "").strip()
+    return value if re.fullmatch(r"[A-Za-z0-9_-]{16,80}", value) else ""
 
 
 def parse_capture_form(form: cgi.FieldStorage) -> dict[str, Any]:
@@ -313,6 +329,7 @@ def parse_capture_form(form: cgi.FieldStorage) -> dict[str, Any]:
             or form.getfirst("marketplaceCode", "")
             or "US"
         ).strip() or "US",
+        "owner_id": sanitize_owner_id(form.getfirst("owner_id", "")),
         "delivery": delivery,
         "lark": {
             "spreadsheet_token": form.getfirst("spreadsheet_token", "").strip(),
@@ -360,6 +377,8 @@ def run_capture(payload: dict[str, Any]) -> list[dict[str, Any]]:
         keywords=payload["keywords"],
         marketplace=payload["marketplace"],
     )
+    for record in records:
+        record["owner_id"] = payload.get("owner_id", "")
     save_records(records)
     return records
 
@@ -414,7 +433,8 @@ class KeywordTrackerHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/static/"):
             return self.serve_file(STATIC_DIR / parsed.path.removeprefix("/static/"))
         if parsed.path == "/api/history":
-            return self.send_json({"records": latest_history()})
+            owner_id = parse_qs(parsed.query).get("owner_id", [""])[0]
+            return self.send_json({"records": latest_history(owner_id)})
         if parsed.path == "/api/daily":
             return self.send_json({"job": load_daily_job()})
         if parsed.path == "/api/template":
