@@ -210,10 +210,26 @@ def traffic_share_number(value: Any) -> float:
 
 
 def sort_records_by_traffic_share(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sort keywords by traffic share within each ASIN group.
+
+    Do not compare traffic share across different ASINs. Each ASIN has its own
+    keyword traffic structure, so the output keeps ASIN groups in the input/order
+    they were captured, then sorts only that ASIN's monitored keywords by
+    keyword traffic share descending.
+    """
+    asin_order: dict[str, int] = {}
+    for item in records:
+        asin = str(item.get("asin", ""))
+        if asin not in asin_order:
+            asin_order[asin] = len(asin_order)
+
     return sorted(
         records,
-        key=lambda item: (traffic_share_number(item.get("traffic_share")), str(item.get("asin", "")), str(item.get("keyword", ""))),
-        reverse=True,
+        key=lambda item: (
+            asin_order.get(str(item.get("asin", "")), 999999),
+            -traffic_share_number(item.get("traffic_share")),
+            str(item.get("keyword", "")).casefold(),
+        ),
     )
 
 def make_workbook(records: list[dict[str, Any]]) -> bytes:

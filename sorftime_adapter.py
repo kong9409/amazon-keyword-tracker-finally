@@ -123,9 +123,13 @@ class SorftimeMcpClient:
         ad_position = traffic_match.get("最近广告曝光位置", "")
         fallback_rank = extract_keyword_rank(ranking)
         keyword_rank = first_non_empty(organic_position, ad_position, fallback_rank)
-        traffic_share = first_non_empty(find_value(traffic_match, TRAFFIC_SHARE_KEYS), find_value(ranking, TRAFFIC_SHARE_KEYS))
-        aba_rank = first_non_empty(find_value(traffic_match, ABA_RANK_KEYS), find_value(ranking, ABA_RANK_KEYS))
-        search_volume = first_non_empty(find_value(traffic_match, SEARCH_VOLUME_KEYS), find_value(ranking, SEARCH_VOLUME_KEYS))
+        # Keyword traffic metrics must come from the ASIN's own traffic-term row.
+        # Do not fall back to generic keyword/search-result data here, otherwise
+        # the ABA/search-volume/traffic-share values may no longer correspond to
+        # this specific ASIN + keyword pair.
+        traffic_share = find_value(traffic_match, TRAFFIC_SHARE_KEYS)
+        aba_rank = find_value(traffic_match, ABA_RANK_KEYS)
+        search_volume = find_value(traffic_match, SEARCH_VOLUME_KEYS)
         price_value = first_non_empty(detail_metrics.get("price"), extract_latest_number(price), find_value(detail, PRICE_KEYS))
         coupon_value = first_non_empty(detail_metrics.get("coupon_value"), find_value(detail, COUPON_KEYS), find_value(price, COUPON_KEYS))
         coupon_type = first_non_empty(detail_metrics.get("coupon_type"), classify_coupon(coupon_value))
@@ -479,29 +483,35 @@ def normalize_marketplace(marketplace: str) -> str:
 
 
 TRAFFIC_SHARE_KEYS = {
-    "关键词流量占比", "流量占比", "流量占比%", "点击份额", "点击占比", "traffic_share",
+    "关键词流量占比", "流量占比", "流量占比%", "点击份额", "点击占比", "流量份额",
+    "自然流量占比", "广告流量占比", "流量比例", "流量贡献", "traffic_share",
     "trafficShare", "flowShare", "flow_share", "clickShare", "click_share", "share", "占比",
+    "TrafficShare", "ClickShare", "FlowShare",
 }
 ABA_RANK_KEYS = {
-    "ABA热度排名", "ABA排名", "ABA", "ABA Rank", "aba_rank", "abaRank",
+    "ABA热度排名", "ABA排名", "ABA", "ABA Rank", "ABA Rank 排名", "aba_rank", "abaRank",
     "searchFrequencyRank", "search_frequency_rank", "SearchFrequencyRank", "关键词热度排名",
+    "搜索频率排名", "Search Frequency Rank", "SFR",
 }
 SEARCH_VOLUME_KEYS = {
     "搜索量", "月搜索量", "关键词搜索量", "search_volume", "searchVolume",
-    "monthly_search_volume", "MonthlySearchVolume", "SearchVolume",
+    "monthly_search_volume", "MonthlySearchVolume", "SearchVolume", "月搜索量预估",
+    "searches", "Searches", "keywordSearchVolume",
 }
 COUPON_KEYS = {
     "优惠券", "coupon", "Coupon", "couponValue", "coupon_value", "couponAmount",
-    "CouponAmount", "couponDiscount", "优惠券金额", "优惠券折扣",
+    "CouponAmount", "couponDiscount", "优惠券金额", "优惠券折扣", "couponPercent",
+    "couponPercentage", "CouponPercent", "couponSavings", "coupon_savings",
 }
-DEAL_STATUS_KEYS = {"是否秒杀", "秒杀", "deal", "isDeal", "is_deal", "dealStatus", "DealStatus", "促销状态"}
+DEAL_STATUS_KEYS = {"是否秒杀", "秒杀", "deal", "isDeal", "is_deal", "dealStatus", "DealStatus", "促销状态", "lightningDeal", "LightningDeal"}
 DEAL_PRICE_KEYS = {
     "秒杀价格", "秒杀价", "lightningDealPrice", "lightning_deal_price",
-    "dealPrice", "DealPrice", "flashDealPrice", "促销价",
+    "dealPrice", "DealPrice", "flashDealPrice", "促销价", "LDPrice", "LightningDealPrice",
 }
 PRIME_PRICE_KEYS = {
     "Prime专享价", "Prime价格", "Prime折扣价", "primePrice", "prime_price",
     "prime_discount_price", "PrimeDiscountPrice", "primeExclusivePrice",
+    "primeExclusiveDiscountPrice", "PrimeExclusiveDiscountPrice",
 }
 
 PRICE_KEYS = {
