@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Amazon 关键词自然位/广告位监控</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Amazon Keyword Rank Tracker</p>
+          <h1>Amazon 关键词排名监控</h1>
+          <p>输入 ASIN 和关键词，抓取自然位、广告位，并同步更新 ABA 热度排名、搜索量、关键词流量占比、价格、优惠券、秒杀价、Prime 折扣价、销量、排名、评分与评价数量。</p>
+        </div>
+        <div class="hero-panel">
+          <div class="hero-panel-title">Sorftime MCP 数据版</div>
+          <div class="hero-panel-text" id="sourceBadge">数据源检查中</div>
+        </div>
+      </section>
+
+      <section class="card template-card">
+        <div class="section-title-row">
+          <div>
+            <h2>模板下载</h2>
+            <p class="hint">可手动输入，也可以下载模板后上传。</p>
+          </div>
+          <button class="secondary small" id="refreshHistory" type="button">刷新记录</button>
+        </div>
+        <div class="template-grid">
+          <a class="template-item" href="/api/template?kind=asins">
+            <span class="template-title">ASIN 模板</span>
+            <span class="template-desc">适合批量上传产品 ASIN</span>
+          </a>
+          <a class="template-item" href="/api/template?kind=keywords">
+            <span class="template-title">关键词模板</span>
+            <span class="template-desc">一行一个关键词</span>
+          </a>
+          <span class="template-item muted-item">
+            <span class="template-title">结果 Excel</span>
+            <span class="template-desc">自然位、广告位和产品指标统一导出</span>
+          </span>
+        </div>
+      </section>
+
+      <form id="captureForm" class="card">
+        <h2>1. 站点和地区</h2>
+        <div class="grid five">
+          <label>
+            站点
+            <select id="marketplaceSelect" name="marketplaceCode">
+              <option value="US">US - Amazon.com</option>
+              <option value="CA">CA - Amazon.ca</option>
+              <option value="UK">UK - Amazon.co.uk</option>
+              <option value="DE">DE - Amazon.de</option>
+              <option value="FR">FR - Amazon.fr</option>
+              <option value="IT">IT - Amazon.it</option>
+              <option value="ES">ES - Amazon.es</option>
+              <option value="JP">JP - Amazon.co.jp</option>
+              <option value="AU">AU - Amazon.com.au</option>
+            </select>
+          </label>
+          <label>
+            站点名称
+            <input id="marketplaceName" value="Amazon US" readonly />
+          </label>
+          <label>
+            Amazon 域名
+            <input id="domain" value="https://www.amazon.com" readonly />
+          </label>
+          <label>
+            默认地区
+            <input id="postalCode" value="10001 / New York" readonly />
+          </label>
+          <label>
+            搜索深度
+            <input name="maxPages" type="number" min="1" max="10" value="3" readonly />
+          </label>
+        </div>
+        <p id="marketHint" class="hint">默认地区：New York, NY。</p>
+
+        <h2>2. 输出方式</h2>
+        <div class="choice-row">
+          <label><input type="radio" name="outputMode" value="excel" checked /> 只下载 Excel</label>
+          <label><input type="radio" name="outputMode" value="feishu" /> 只写入飞书</label>
+          <label><input type="radio" name="outputMode" value="both" /> Excel + 飞书</label>
+        </div>
+
+        <div id="larkFields" class="lark-fields" hidden>
+          <div class="grid two">
+            <label>
+              飞书表格 URL
+              <input name="spreadsheet_url" type="text" placeholder="https://.../sheets/..." />
+            </label>
+            <label>
+              spreadsheet token
+              <input name="spreadsheet_token" type="text" placeholder="URL 和 token 填一个即可" />
+            </label>
+          </div>
+          <div class="grid three">
+            <label>
+              sheet_id
+              <input name="sheet_id" type="text" placeholder="sheet_xxx" />
+            </label>
+            <label>
+              追加范围
+              <input name="append_range" type="text" placeholder="A1:S1" />
+            </label>
+            <label class="inline-check">
+              <input name="include_header" type="checkbox" />
+              同步表头
+            </label>
+          </div>
+        </div>
+
+        <h2>3. 手动输入</h2>
+        <div class="grid two">
+          <label>
+            ASIN，可多行
+            <textarea name="asinText" placeholder="每行一个 ASIN"></textarea>
+          </label>
+          <label>
+            关键词，一行一个
+            <textarea name="keywordText" placeholder="每行一个关键词"></textarea>
+          </label>
+        </div>
+
+        <h2>4. 或上传模板</h2>
+        <div class="grid two">
+          <label>
+            ASIN 模板 CSV/XLSX/TXT
+            <input name="asinFile" type="file" accept=".csv,.xlsx,.xls,.txt" />
+          </label>
+          <label>
+            关键词模板 CSV/XLSX/TXT
+            <input name="keywordFile" type="file" accept=".csv,.xlsx,.xls,.txt" />
+          </label>
+        </div>
+
+        <div class="button-row">
+          <button id="runCapture" type="submit">开始抓取</button>
+          <button id="testExcelBtn" type="button" class="secondary">测试导出 Excel</button>
+          <label class="daily-control">
+            <input id="dailyEnabled" name="daily_enabled" type="checkbox" />
+            每天
+            <input id="runTime" name="run_time" type="time" value="09:00" />
+          </label>
+          <button class="secondary" id="saveDaily" type="button">保存每日任务</button>
+        </div>
+      </form>
+
+      <section id="progressCard" class="card">
+        <div class="progress-head">
+          <div>
+            <h2 id="progressTitle">准备开始</h2>
+            <p id="progressSub" class="hint">提交任务后，这里会显示运行状态。</p>
+          </div>
+          <strong id="progressPct">0%</strong>
+        </div>
+        <div class="progress-bar"><div id="progressFill"></div></div>
+        <div id="resultLinks" class="result-links"></div>
+        <details open>
+          <summary>运行日志</summary>
+          <div id="logBox" class="log">等待任务。</div>
+        </details>
+      </section>
+
+      <section class="card history-card">
+        <div class="section-title-row">
+          <div>
+            <h2>最近记录</h2>
+            <p class="hint">最近 100 条抓取结果。</p>
+          </div>
+          <div class="stats">
+            <div><strong id="recordCount">0</strong><span>条记录</span></div>
+            <div><strong id="latestDate">-</strong><span>最近日期</span></div>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>ASIN</th>
+                <th>关键词</th>
+                <th>流量占比</th>
+                <th>ABA热度</th>
+                <th>搜索量</th>
+                <th>自然位</th>
+                <th>广告位</th>
+                <th>价格</th>
+                <th>优惠券</th>
+                <th>秒杀价</th>
+                <th>Prime价</th>
+                <th>月销量</th>
+                <th>大类排名</th>
+                <th>评分</th>
+                <th>评价数</th>
+                <th>链接</th>
+              </tr>
+            </thead>
+            <tbody id="historyBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <div id="toast" role="status"></div>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
