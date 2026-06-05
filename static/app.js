@@ -93,7 +93,8 @@ function setProgress(percent, title, sub, log) {
 }
 
 async function refreshHistory() {
-  const response = await fetch(`/api/history?owner_id=${encodeURIComponent(getOwnerId())}`);
+  const response = await fetch(`/api/history?owner_id=${encodeURIComponent(getOwnerId())}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`历史记录接口不可用：HTTP ${response.status}`);
   const data = await response.json();
   const records = data.records || [];
   historyBody.innerHTML = records
@@ -145,40 +146,80 @@ form.addEventListener("change", (event) => {
   if (event.target.id === "marketplaceSelect") applyMarketplace(event.target.value);
 });
 
+async function readJsonOrText(response) {
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch (_error) {
+    return { ok: false, error: text.slice(0, 500) || `HTTP ${response.status}` };
+  }
+}
+
+async function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function pollJob(jobId) {
+  let gatewayFailures = 0;
+  while (true) {
+    await wait(1500);
+    let data;
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+      data = await readJsonOrText(response);
+      if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      gatewayFailures = 0;
+    } catch (error) {
+      gatewayFailures += 1;
+      setProgress(
+        Math.min(95, 10 + gatewayFailures),
+        "等待服务恢复",
+        "Zeabur 网关暂时没有返回 JSON，正在重试。",
+        `读取进度失败 ${gatewayFailures}/20：${error.message}`,
+      );
+      if (gatewayFailures >= 20) throw new Error("连续读取进度失败，后端服务可能已重启或被 Zeabur 回收。请减少 ASIN/关键词数量后重试。");
+      continue;
+    }
+
+    const job = data.job || {};
+    const logs = (job.logs || []).join("\n");
+    if (job.status === "queued") {
+      setProgress(job.percent || 1, "等待启动", `共 ${job.total || 0} 条任务。`, logs);
+    } else if (job.status === "running") {
+      setProgress(job.percent || 20, `抓取中：${job.done || 0}/${job.total || 0}`, "后台正在调用 Sorftime MCP，前台只显示进度。", logs);
+    } else if (job.status === "saving") {
+      setProgress(job.percent || 88, "保存结果中", "正在生成 Excel 或写入飞书。", logs);
+    } else if (job.status === "completed") {
+      setProgress(100, "完成", `已处理 ${job.records_count || 0} 条记录。`, logs);
+      const links = [];
+      if (job.excel) links.push(`<a class="download" href="${escapeAttribute(job.excel)}">下载 Excel</a>`);
+      if (job.lark) links.push(`<span class="download">飞书写入 ${job.records_count || 0} 行</span>`);
+      if (!links.length) links.push(`<span class="download">已处理 ${job.records_count || 0} 条</span>`);
+      resultLinks.innerHTML = links.join("");
+      showToast(`已处理：${job.records_count || 0} 条`);
+      return job;
+    } else if (job.status === "failed") {
+      setProgress(job.percent || 12, "失败", job.error || job.lark?.message || "任务失败", logs);
+      throw new Error(job.error || job.lark?.message || "任务失败");
+    }
+  }
+}
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   setBusy(true);
   resultLinks.innerHTML = "";
-  setProgress(8, "提交任务中", "任务已提交，正在调用 Sorftime MCP。", "正在提交任务...");
+  setProgress(2, "提交任务中", "正在创建后台任务。", "正在提交任务...");
   try {
-    const response = await fetch("/api/capture", {
+    const response = await fetch("/api/jobs", {
       method: "POST",
       body: captureFormData(),
     });
-    const contentType = response.headers.get("Content-Type") || "";
-
-    if (!response.ok && contentType.includes("application/json")) {
-      const data = await response.json();
-      throw new Error(data.error || "采集失败");
-    }
-
-    if (contentType.includes("spreadsheetml")) {
-      setProgress(92, "正在生成 Excel", "结果已返回，正在下载文件。", "Excel 文件已生成。");
-      const blob = await response.blob();
-      downloadBlob(blob, `keyword-rank-results-${new Date().toISOString().slice(0, 10)}.xlsx`);
-      resultLinks.innerHTML = `<span class="download">Excel 已下载</span>`;
-      setProgress(100, "完成", "Excel 已生成并下载。", "任务完成。");
-      showToast("Excel 已生成");
-    } else {
-      const data = await response.json();
-      if (!data.ok) throw new Error(data.lark?.message || data.error || "写入飞书失败");
-      const links = [];
-      if (data.excel) links.push(`<a class="download" href="${escapeAttribute(data.excel)}">下载 Excel</a>`);
-      if (data.lark) links.push(`<span class="download">飞书写入 ${data.records || 0} 行</span>`);
-      resultLinks.innerHTML = links.join("");
-      setProgress(100, "完成", `已处理 ${data.records || 0} 条记录。`, "任务完成。");
-      showToast(`已处理：${data.records || 0} 条`);
-    }
+    const data = await readJsonOrText(response);
+    if (!response.ok || !data.ok) throw new Error(data.error || "任务提交失败");
+    const job = data.job || {};
+    setProgress(job.percent || 3, "任务已创建", `任务 ID：${job.id || "-"}`, (job.logs || []).join("\n"));
+    await pollJob(job.id);
     await refreshHistory();
   } catch (error) {
     setProgress(12, "失败", error.message, error.stack || error.message);
@@ -227,8 +268,19 @@ document.querySelector("#refreshHistory").addEventListener("click", refreshHisto
 async function boot() {
   applyMarketplace(marketplaceSelect.value);
   syncDeliveryFields();
-  await refreshHistory();
-  sourceBadge.textContent = "输出自然位、广告位、价格、销量、排名、评分和评价数。";
+  try {
+    const health = await fetch("/api/health", { cache: "no-store" });
+    sourceBadge.textContent = health.ok
+      ? "服务已连接，输出自然位、广告位、价格、销量、排名、评分和评价数。"
+      : "服务启动异常，请检查 Zeabur Runtime Logs。";
+  } catch (_error) {
+    sourceBadge.textContent = "后端服务暂不可用，请检查 Zeabur Runtime Logs。";
+  }
+  try {
+    await refreshHistory();
+  } catch (_error) {
+    historyBody.innerHTML = "";
+  }
 }
 
 boot();

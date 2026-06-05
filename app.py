@@ -8,6 +8,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -26,6 +27,7 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 DATA_DIR = BASE_DIR / "data"
 EXPORT_DIR = BASE_DIR / "exports"
+JOB_DIR = DATA_DIR / "jobs"
 DB_PATH = DATA_DIR / "keyword_tracker.db"
 DAILY_JOB_PATH = DATA_DIR / "daily_job.json"
 APP_HOST = os.environ.get("HOST", "127.0.0.1")
@@ -70,6 +72,7 @@ DB_CAPTURE_COLUMNS = {
 def ensure_storage() -> None:
     DATA_DIR.mkdir(exist_ok=True)
     EXPORT_DIR.mkdir(exist_ok=True)
+    JOB_DIR.mkdir(exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
@@ -383,6 +386,173 @@ def run_capture(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return records
 
 
+
+def job_path(job_id: str) -> Path:
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "", job_id or "")
+    return JOB_DIR / f"{safe_id}.json"
+
+
+def write_job(job: dict[str, Any]) -> None:
+    JOB_DIR.mkdir(exist_ok=True)
+    tmp_path = job_path(job["id"]).with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(job_path(job["id"]))
+
+
+def read_job(job_id: str) -> dict[str, Any] | None:
+    path = job_path(job_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def append_job_log(job: dict[str, Any], line: str) -> None:
+    logs = job.setdefault("logs", [])
+    logs.append(f"{datetime.now().strftime('%H:%M:%S')} {line}")
+    del logs[:-120]
+
+
+def public_job_payload(job: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(job)
+    payload.pop("payload", None)
+    payload.pop("records", None)
+    return payload
+
+
+def run_capture_with_progress(job_id: str, payload: dict[str, Any]) -> None:
+    job = read_job(job_id) or {"id": job_id}
+    try:
+        asins = payload.get("asins", [])
+        keywords = payload.get("keywords", [])
+        if not asins:
+            raise ValueError("请至少输入或上传 1 个 ASIN")
+        if not keywords:
+            raise ValueError("请至少输入或上传 1 个关键词")
+
+        total = max(1, len(asins) * len(keywords))
+        records: list[dict[str, Any]] = []
+        client = build_sorftime_client()
+        capture_date = datetime.now().date().isoformat()
+        captured_at = datetime.now().isoformat(timespec="seconds")
+        marketplace = payload.get("marketplace", "US")
+        owner_id = payload.get("owner_id", "")
+
+        job.update({"status": "running", "percent": 3, "done": 0, "total": total})
+        append_job_log(job, f"任务启动：{len(asins)} 个 ASIN × {len(keywords)} 个关键词，共 {total} 条。")
+        write_job(job)
+
+        done = 0
+        for asin in asins:
+            for keyword in keywords:
+                done += 1
+                job.update({"status": "running", "done": done, "total": total, "percent": int(5 + (done - 1) / total * 80)})
+                append_job_log(job, f"抓取中 {done}/{total}：{asin} | {keyword}")
+                write_job(job)
+                try:
+                    result = client.capture_keyword(asin, keyword, marketplace)
+                except Exception as exc:
+                    result = {
+                        "keyword_rank": "",
+                        "organic_position": "",
+                        "organic_time": "",
+                        "ad_position": "",
+                        "ad_time": "",
+                        "price": "",
+                        "estimated_sales": "",
+                        "product_rank": "",
+                        "rating": "",
+                        "review_count": "",
+                        "product_url": "",
+                        "status": "failed",
+                        "message": str(exc),
+                        "raw": {},
+                    }
+                records.append(
+                    {
+                        "owner_id": owner_id,
+                        "date": capture_date,
+                        "captured_at": captured_at,
+                        "marketplace": marketplace,
+                        "asin": asin,
+                        "keyword": keyword,
+                        "keyword_rank": result.get("keyword_rank", ""),
+                        "organic_position": result.get("organic_position", ""),
+                        "organic_time": result.get("organic_time", ""),
+                        "ad_position": result.get("ad_position", ""),
+                        "ad_time": result.get("ad_time", ""),
+                        "price": result.get("price", ""),
+                        "estimated_sales": result.get("estimated_sales", ""),
+                        "product_rank": result.get("product_rank", ""),
+                        "rating": result.get("rating", ""),
+                        "review_count": result.get("review_count", ""),
+                        "product_url": result.get("product_url", ""),
+                        "source": client.source_name,
+                        "status": result.get("status", "ok"),
+                        "message": result.get("message", ""),
+                        "raw": result.get("raw", result),
+                    }
+                )
+                job.update({"percent": int(5 + done / total * 80), "done": done})
+                write_job(job)
+
+        job.update({"status": "saving", "percent": 88})
+        append_job_log(job, "正在保存历史记录并生成输出文件。")
+        write_job(job)
+        save_records(records)
+
+        output_name = ""
+        lark_result: dict[str, Any] | None = None
+        delivery = payload.get("delivery", "excel")
+        if delivery in {"excel", "both"}:
+            output_name = f"keyword-rank-results-{datetime.now().strftime('%Y%m%d-%H%M%S')}.xlsx"
+            (EXPORT_DIR / output_name).write_bytes(make_workbook(records))
+        if delivery in {"lark", "both"}:
+            lark_result = append_records_to_lark(records, payload.get("lark", {}), FIELD_COLUMNS)
+
+        job.update(
+            {
+                "status": "completed" if not lark_result or lark_result.get("ok") else "failed",
+                "percent": 100,
+                "done": total,
+                "records_count": len(records),
+                "excel": f"/exports/{output_name}" if output_name else "",
+                "lark": lark_result,
+                "finished_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+        append_job_log(job, f"任务完成：{len(records)} 条记录。")
+        if lark_result and not lark_result.get("ok"):
+            append_job_log(job, f"飞书写入失败：{lark_result.get('message', '')}")
+        write_job(job)
+    except Exception as exc:
+        job.update({"status": "failed", "percent": job.get("percent", 0), "error": str(exc), "finished_at": datetime.now().isoformat(timespec="seconds")})
+        append_job_log(job, f"任务失败：{exc}")
+        write_job(job)
+
+
+def create_capture_job(payload: dict[str, Any]) -> dict[str, Any]:
+    job_id = uuid.uuid4().hex
+    total = max(1, len(payload.get("asins", [])) * len(payload.get("keywords", [])))
+    job = {
+        "id": job_id,
+        "status": "queued",
+        "percent": 1,
+        "done": 0,
+        "total": total,
+        "records_count": 0,
+        "logs": [f"{datetime.now().strftime('%H:%M:%S')} 任务已创建，等待启动。"],
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "payload": payload,
+    }
+    write_job(job)
+    thread = threading.Thread(target=run_capture_with_progress, args=(job_id, payload), daemon=True)
+    thread.start()
+    return public_job_payload(job)
+
+
 def save_daily_job(payload: dict[str, Any], enabled: bool, run_time: str) -> None:
     job = {
         "enabled": enabled,
@@ -426,15 +596,30 @@ def scheduler_loop() -> None:
 
 
 class KeywordTrackerHandler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
             return self.serve_file(STATIC_DIR / "index.html")
+        if parsed.path == "/api/health":
+            return self.send_json({"ok": True, "service": "amazon-keyword-tracker", "time": datetime.now().isoformat(timespec="seconds")})
         if parsed.path.startswith("/static/"):
             return self.serve_file(STATIC_DIR / parsed.path.removeprefix("/static/"))
         if parsed.path == "/api/history":
             owner_id = parse_qs(parsed.query).get("owner_id", [""])[0]
             return self.send_json({"records": latest_history(owner_id)})
+        if parsed.path.startswith("/api/jobs/"):
+            job_id = parsed.path.rsplit("/", 1)[-1]
+            job = read_job(job_id)
+            if not job:
+                return self.send_json({"ok": False, "error": "任务不存在或服务已重启"}, status=404)
+            return self.send_json({"ok": True, "job": public_job_payload(job)})
         if parsed.path == "/api/daily":
             return self.send_json({"job": load_daily_job()})
         if parsed.path == "/api/template":
@@ -452,6 +637,11 @@ class KeywordTrackerHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         try:
+            if self.path == "/api/jobs":
+                payload = parse_capture_form(form_from_request(self))
+                job = create_capture_job(payload)
+                return self.send_json({"ok": True, "job": job})
+
             if self.path == "/api/capture":
                 payload = parse_capture_form(form_from_request(self))
                 records = run_capture(payload)
@@ -541,6 +731,8 @@ class KeywordTrackerHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-store" if content_type.startswith("application/json") else "public, max-age=60")
         for key, value in (extra_headers or {}).items():
             self.send_header(key, value)
         self.end_headers()

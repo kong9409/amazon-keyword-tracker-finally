@@ -1,8 +1,5 @@
 {
   "build": {
     "type": "dockerfile"
-  },
-  "run": {
-    "startCommand": "python app.py"
   }
 }
