@@ -491,3 +491,24 @@ td a {
     align-items: stretch;
   }
 }
+
+.compact-row {
+  align-items: center;
+  margin-top: 6px;
+}
+
+.compact-row h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 800;
+  font-family: var(--font-sans);
+}
+
+.remember-check {
+  flex: 0 0 auto;
+  font-size: 13px;
+  padding: 8px 10px;
+  border: 1px solid #dbe4f0;
+  border-radius: 12px;
+  background: #f8fafc;
+}

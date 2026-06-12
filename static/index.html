@@ -88,17 +88,37 @@
         </div>
 
         <div id="larkFields" class="lark-fields" hidden>
+          <div class="section-title-row compact-row">
+            <div>
+              <h3>飞书连接配置</h3>
+              <p class="hint">适合公开发给不同公司使用：每个用户在页面自行填写飞书应用凭证和多维表链接。</p>
+            </div>
+            <label class="inline-check remember-check">
+              <input id="rememberFeishu" type="checkbox" />
+              仅在当前浏览器记住
+            </label>
+          </div>
+          <div class="grid two">
+            <label>
+              飞书 App ID
+              <input id="feishuAppId" name="feishu_app_id" type="text" autocomplete="off" placeholder="cli_xxxxxxxxxxxxxxxx" />
+            </label>
+            <label>
+              飞书 App Secret
+              <input id="feishuAppSecret" name="feishu_app_secret" type="password" autocomplete="off" placeholder="仅本次请求临时使用，不写入 GitHub" />
+            </label>
+          </div>
           <div class="grid two">
             <label>
               飞书多维表链接
-              <input name="base_url" type="text" placeholder="https://xxx.feishu.cn/base/app_token?table=tblxxx&view=vewxxx" />
+              <input id="feishuBaseUrl" name="base_url" type="text" placeholder="https://xxx.feishu.cn/base/app_token?table=tblxxx&view=vewxxx" />
             </label>
             <label>
               table_id（可选）
               <input name="table_id" type="text" placeholder="通常会从链接里的 table=tblxxx 自动识别" />
             </label>
           </div>
-          <p class="hint">这里只支持飞书多维表 base 链接；不需要填写 sheet_id、追加范围或同步表头。Zeabur 环境变量里需要配置 FEISHU_APP_ID 和 FEISHU_APP_SECRET。</p>
+          <p class="hint">页面填写优先；如果页面不填，才会使用 Zeabur 环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET。App Secret 不会写入任务日志、Excel 或公开仓库。</p>
         </div>
 
         <h2>3. 手动输入</h2>

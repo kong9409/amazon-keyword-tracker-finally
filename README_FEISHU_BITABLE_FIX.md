@@ -7,18 +7,21 @@
 新版改为直接调用飞书开放平台 Bitable API：
 
 - 从飞书多维表链接自动解析 `app_token` 和 `table_id`
-- 使用 Zeabur 环境变量 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 获取 `tenant_access_token`
+- 优先使用页面填写的 `飞书 App ID`、`飞书 App Secret` 获取 `tenant_access_token`
+- 如果页面没填，再回退到 Zeabur 环境变量 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`
 - 自动读取多维表字段，只写入表里已经存在的字段
 - 如果字段缺失，不会整单失败，会在返回结果里提示 ignored_missing_fields
 
-## Zeabur 必填环境变量
+## Zeabur 环境变量
+
+对外通用版只建议固定 Sorftime，不固定飞书凭证：
 
 ```text
 SORFTIME_MCP_URL=https://mcp.sorftime.com?key=你的key
-FEISHU_APP_ID=cli_xxxxxxxxxxxxxxxx
-FEISHU_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 HOST=0.0.0.0
 ```
+
+飞书 App ID / App Secret 由使用者在网页填写。内部专用部署时，也可以继续把 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 放在 Zeabur 环境变量里作为兜底。
 
 ## 页面填写方式
 

@@ -7,6 +7,10 @@ const historyBody = document.querySelector("#historyBody");
 const recordCount = document.querySelector("#recordCount");
 const latestDate = document.querySelector("#latestDate");
 const larkFields = document.querySelector("#larkFields");
+const rememberFeishu = document.querySelector("#rememberFeishu");
+const feishuAppId = document.querySelector("#feishuAppId");
+const feishuAppSecret = document.querySelector("#feishuAppSecret");
+const feishuBaseUrl = document.querySelector("#feishuBaseUrl");
 const sourceBadge = document.querySelector("#sourceBadge");
 const marketplaceSelect = document.querySelector("#marketplaceSelect");
 const marketplaceName = document.querySelector("#marketplaceName");
@@ -20,6 +24,7 @@ const progressFill = document.querySelector("#progressFill");
 const logBox = document.querySelector("#logBox");
 const resultLinks = document.querySelector("#resultLinks");
 const OWNER_KEY = "amazonKeywordTrackerOwnerId";
+const FEISHU_LOCAL_KEY = "amazonKeywordTrackerFeishuConfig";
 
 const MARKETPLACES = {
   US: { name: "Amazon US", domain: "https://www.amazon.com", postal: "10001 / New York", hint: "默认地区：New York, NY。" },
@@ -65,7 +70,37 @@ function getOwnerId() {
 function captureFormData() {
   const data = new FormData(form);
   data.set("owner_id", getOwnerId());
+  if (rememberFeishu?.checked) saveFeishuConfig();
   return data;
+}
+
+function loadFeishuConfig() {
+  try {
+    const raw = localStorage.getItem(FEISHU_LOCAL_KEY);
+    if (!raw) return;
+    const config = JSON.parse(raw);
+    if (config.appId && feishuAppId) feishuAppId.value = config.appId;
+    if (config.appSecret && feishuAppSecret) feishuAppSecret.value = config.appSecret;
+    if (config.baseUrl && feishuBaseUrl) feishuBaseUrl.value = config.baseUrl;
+    if (rememberFeishu) rememberFeishu.checked = true;
+  } catch (_) {
+    localStorage.removeItem(FEISHU_LOCAL_KEY);
+  }
+}
+
+function saveFeishuConfig() {
+  if (!rememberFeishu?.checked) return;
+  const config = {
+    appId: feishuAppId?.value || "",
+    appSecret: feishuAppSecret?.value || "",
+    baseUrl: feishuBaseUrl?.value || "",
+  };
+  localStorage.setItem(FEISHU_LOCAL_KEY, JSON.stringify(config));
+}
+
+function clearFeishuConfigIfNeeded() {
+  if (rememberFeishu?.checked) return;
+  localStorage.removeItem(FEISHU_LOCAL_KEY);
 }
 
 function syncDeliveryFields() {
@@ -150,6 +185,13 @@ function downloadBlob(blob, filename) {
 form.addEventListener("change", (event) => {
   if (event.target.name === "outputMode") syncDeliveryFields();
   if (event.target.id === "marketplaceSelect") applyMarketplace(event.target.value);
+  if (event.target.id === "rememberFeishu") clearFeishuConfigIfNeeded();
+});
+
+[feishuAppId, feishuAppSecret, feishuBaseUrl].forEach((input) => {
+  input?.addEventListener("input", () => {
+    if (rememberFeishu?.checked) saveFeishuConfig();
+  });
 });
 
 async function readJsonOrText(response) {
@@ -272,6 +314,7 @@ saveDailyButton.addEventListener("click", async () => {
 document.querySelector("#refreshHistory").addEventListener("click", refreshHistory);
 
 async function boot() {
+  loadFeishuConfig();
   applyMarketplace(marketplaceSelect.value);
   syncDeliveryFields();
   try {

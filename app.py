@@ -406,6 +406,8 @@ def parse_capture_form(form: Any) -> dict[str, Any]:
         "owner_id": sanitize_owner_id(form.getfirst("owner_id", "")),
         "delivery": delivery,
         "lark": {
+            "feishu_app_id": form.getfirst("feishu_app_id", "").strip(),
+            "feishu_app_secret": form.getfirst("feishu_app_secret", "").strip(),
             "base_url": form.getfirst("base_url", "").strip(),
             "bitable_url": form.getfirst("bitable_url", "").strip(),
             "spreadsheet_url": form.getfirst("spreadsheet_url", "").strip(),
@@ -560,6 +562,25 @@ def public_job_payload(job: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def sanitize_payload_for_disk(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy that is safe to persist in job/daily metadata.
+
+    Feishu App Secret entered on the webpage is request-scoped. It must not be
+    written to JSON job files or daily-job config. Environment variables can be
+    used for scheduled jobs instead.
+    """
+    clean = json.loads(json.dumps(payload, ensure_ascii=False))
+    lark = clean.get("lark")
+    if isinstance(lark, dict):
+        if lark.get("feishu_app_secret"):
+            lark["feishu_app_secret"] = ""
+        # App ID is not as sensitive as Secret, but clearing it avoids accidental
+        # credential leakage in exported job metadata.
+        if lark.get("feishu_app_id"):
+            lark["feishu_app_id"] = ""
+    return clean
+
+
 def run_capture_with_progress(job_id: str, payload: dict[str, Any]) -> None:
     job = read_job(job_id) or {"id": job_id}
     try:
@@ -700,7 +721,7 @@ def create_capture_job(payload: dict[str, Any]) -> dict[str, Any]:
         "records_count": 0,
         "logs": [f"{datetime.now().strftime('%H:%M:%S')} 任务已创建，等待启动。"],
         "created_at": datetime.now().isoformat(timespec="seconds"),
-        "payload": payload,
+        "payload": sanitize_payload_for_disk(payload),
     }
     write_job(job)
     thread = threading.Thread(target=run_capture_with_progress, args=(job_id, payload), daemon=True)
@@ -712,7 +733,7 @@ def save_daily_job(payload: dict[str, Any], enabled: bool, run_time: str) -> Non
     job = {
         "enabled": enabled,
         "run_time": run_time or "09:00",
-        "payload": payload,
+        "payload": sanitize_payload_for_disk(payload),
         "last_run_date": None,
     }
     DAILY_JOB_PATH.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")

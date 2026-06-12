@@ -24,12 +24,14 @@ def append_records_to_lark(
     if not records:
         return {"ok": True, "message": "没有需要写入的记录"}
 
-    app_id = os.environ.get("FEISHU_APP_ID", "").strip()
-    app_secret = os.environ.get("FEISHU_APP_SECRET", "").strip()
+    # Page-entered credentials take priority. Environment variables are only a
+    # fallback for private/internal deployments. Do not log or return the secret.
+    app_id = (config.get("feishu_app_id") or os.environ.get("FEISHU_APP_ID", "")).strip()
+    app_secret = (config.get("feishu_app_secret") or os.environ.get("FEISHU_APP_SECRET", "")).strip()
     if not app_id or not app_secret:
         return {
             "ok": False,
-            "message": "Zeabur 环境变量缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET，请先配置飞书自建应用凭证。",
+            "message": "请在页面填写飞书 App ID 和 App Secret，或在部署环境变量中配置 FEISHU_APP_ID / FEISHU_APP_SECRET。",
         }
 
     parsed = parse_bitable_config(config)

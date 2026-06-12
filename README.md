@@ -97,11 +97,10 @@ Excel 和历史记录包含：
 
 ## 飞书多维表写入
 
-Zeabur 环境变量需要添加：
+对外通用版不需要在 Zeabur 环境变量里固定飞书凭证。用户在页面选择 `只写入飞书` 或 `Excel + 飞书` 后，自行填写：
 
-```text
-FEISHU_APP_ID=cli_xxxxxxxxxxxxxxxx
-FEISHU_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
+- 飞书 App ID
+- 飞书 App Secret
+- 飞书多维表 base 链接
 
-页面里只需要填写飞书多维表 base 链接，工具会自动解析 app_token 和 table_id。
+工具会自动从 base 链接解析 app_token 和 table_id。页面填写的 App ID / Secret 优先；如果页面不填，才会使用 Zeabur 环境变量 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 作为内部部署兜底。
