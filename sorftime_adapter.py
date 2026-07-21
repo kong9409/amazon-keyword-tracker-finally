@@ -29,6 +29,12 @@ REQUIRED_SORFTIME_TOOLS = {
     "product_detail",
     "product_trend",
 }
+CORE_SORFTIME_TOOLS = {
+    "product_traffic_terms",
+    "keyword_detail",
+    "keyword_search_results",
+    "product_detail",
+}
 
 
 class SorftimeClient(Protocol):
@@ -401,6 +407,8 @@ class SorftimeMcpClient:
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         self._ensure_initialized()
+        if self._tool_name_map and name not in self._tool_name_map:
+            raise RuntimeError(f"Sorftime MCP 未提供 Amazon 工具：{name}")
         actual_name = self._tool_name_map.get(name, name)
         started = time.perf_counter()
         response = self._post(
@@ -457,10 +465,18 @@ class SorftimeMcpClient:
                 "MCP 已连接，但没有识别到 Sorftime 工具。请确认输入的是 Sorftime MCP，而不是普通网页地址。"
             )
         missing = sorted(REQUIRED_SORFTIME_TOOLS - set(recognized))
+        missing_core = sorted(CORE_SORFTIME_TOOLS - set(recognized))
+        if missing_core:
+            raise RuntimeError(
+                "MCP 已连接，但缺少 Amazon 关键词监控核心工具："
+                + "、".join(missing_core)
+                + "。请确认连接的是 Sorftime Amazon MCP。"
+            )
         return {
             "source": self.source_name,
             "tool_count": len(names),
             "recognized_tools": recognized,
+            "resolved_tools": {name: self._tool_name_map[name] for name in recognized},
             "missing_tools": missing,
         }
 
@@ -554,6 +570,7 @@ class SorftimeCliClient:
         self._lock = threading.Lock()
         self._configured = False
         self._keyword_rows_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self._keyword_detail_cache: dict[tuple[str, str], Any] = {}
         self._product_cache: dict[tuple[str, str], Any] = {}
 
     def stats(self) -> dict[str, Any]:
@@ -615,8 +632,8 @@ class SorftimeCliClient:
         identity = self._run(["whoami"], timeout=60)
         return {
             "source": self.source_name,
-            "tool_count": 2,
-            "recognized_tools": ["ASINRequestKeywordv2", "ProductRequest"],
+            "tool_count": 3,
+            "recognized_tools": ["ASINRequestKeywordv2", "KeywordRequest", "ProductRequest"],
             "missing_tools": [],
             "identity": identity,
         }
@@ -635,6 +652,12 @@ class SorftimeCliClient:
             self._keyword_rows_cache[key] = collect_dict_rows(data)
         return self._keyword_rows_cache[key]
 
+    def keyword_detail(self, keyword: str, site: str) -> Any:
+        key = (keyword.casefold(), site)
+        if key not in self._keyword_detail_cache:
+            self._keyword_detail_cache[key] = self._api("KeywordRequest", {"keyword": keyword}, site)
+        return self._keyword_detail_cache[key]
+
     def product_detail(self, asin: str, site: str) -> Any:
         key = (asin.upper(), site)
         if key not in self._product_cache:
@@ -651,38 +674,68 @@ class SorftimeCliClient:
             if row_keyword(row).casefold() == target:
                 keyword_row = dict(row)
                 break
-        detail = self.product_detail(asin, site)
-        product = parse_product_detail(detail)
+        raw: dict[str, Any] = {"keyword_row": keyword_row}
         organic_position = find_value(keyword_row, ORGANIC_POSITION_KEYS)
         ad_position = find_value(keyword_row, AD_POSITION_KEYS)
         traffic_share = find_value(keyword_row, TRAFFIC_SHARE_KEYS)
         aba_rank = find_value(keyword_row, ABA_RANK_KEYS)
         search_volume = find_value(keyword_row, SEARCH_VOLUME_KEYS)
-        values = [organic_position, ad_position, traffic_share, aba_rank, search_volume, *product.values()]
-        found_any = any(value not in EMPTY for value in values)
+
+        # The CLI matrix maps keyword-level search volume/heat to KeywordRequest.
+        # ASINRequestKeywordv2 remains the primary source for ASIN-specific share
+        # and position; KeywordRequest is called only when keyword metrics are absent.
+        if aba_rank in EMPTY or search_volume in EMPTY:
+            try:
+                keyword_data = self.keyword_detail(keyword, site)
+                raw["keyword_detail"] = keyword_data
+                aba_rank = first_non_empty(aba_rank, find_value(keyword_data, ABA_RANK_KEYS))
+                search_volume = first_non_empty(search_volume, find_value(keyword_data, SEARCH_VOLUME_KEYS))
+            except Exception as exc:
+                raw["keyword_detail_error"] = str(exc)
+
+        detail = self.product_detail(asin, site)
+        raw["product_detail"] = detail
+        product = parse_product_detail(detail)
+        core_values = {
+            "流量占比": traffic_share,
+            "ABA热度": aba_rank,
+            "搜索量": search_volume,
+            "自然位": organic_position,
+            "价格": product.get("price", ""),
+            "月销量": product.get("estimated_sales", ""),
+            "大类排名": product.get("product_rank", ""),
+            "评分": product.get("rating", ""),
+            "评价数": product.get("review_count", ""),
+        }
+        found_any = any(value not in EMPTY for value in [*core_values.values(), ad_position])
+        missing_core = [label for label, value in core_values.items() if value in EMPTY]
+        status = "ok" if found_any and not missing_core else ("partial" if found_any else "not_found")
+        message = "" if not missing_core else "Sorftime CLI 未返回：" + "、".join(missing_core)
+        if not found_any:
+            message = "Sorftime CLI 未返回匹配数据。"
         return {
             "keyword_rank": first_non_empty(organic_position, ad_position),
-            "organic_position": organic_position,
+            "organic_position": normalize_position(organic_position),
             "organic_time": find_value(keyword_row, ORGANIC_TIME_KEYS),
-            "ad_position": ad_position,
+            "ad_position": normalize_position(ad_position),
             "ad_time": find_value(keyword_row, AD_TIME_KEYS),
-            "traffic_share": traffic_share,
-            "aba_rank": aba_rank,
-            "search_volume": search_volume,
-            "price": product.get("price", ""),
+            "traffic_share": normalize_percent(traffic_share),
+            "aba_rank": normalize_number(aba_rank),
+            "search_volume": normalize_number(search_volume),
+            "price": normalize_money(product.get("price", "")),
             "coupon_type": product.get("coupon_type", ""),
             "coupon_value": product.get("coupon_value", ""),
             "deal_status": product.get("deal_status", ""),
-            "deal_price": product.get("deal_price", ""),
-            "prime_discount_price": product.get("prime_discount_price", ""),
-            "estimated_sales": product.get("estimated_sales", ""),
-            "product_rank": product.get("product_rank", ""),
-            "rating": product.get("rating", ""),
-            "review_count": product.get("review_count", ""),
+            "deal_price": normalize_money(product.get("deal_price", "")),
+            "prime_discount_price": normalize_money(product.get("prime_discount_price", "")),
+            "estimated_sales": normalize_number(product.get("estimated_sales", "")),
+            "product_rank": normalize_number(product.get("product_rank", "")),
+            "rating": normalize_decimal(product.get("rating", "")),
+            "review_count": normalize_number(product.get("review_count", "")),
             "product_url": amazon_product_url(asin, site),
-            "status": "ok" if found_any else "not_found",
-            "message": "" if found_any else "Sorftime CLI 未返回匹配数据。",
-            "raw": {"keyword_row": keyword_row, "product_detail": detail},
+            "status": status,
+            "message": message,
+            "raw": raw,
         }
 
     def close(self) -> None:
@@ -814,14 +867,56 @@ class SorftimeStdioMcpClient(SorftimeMcpClient):
                 pass
 
 
+NON_AMAZON_TOOL_TOKENS = {
+    "tiktok", "temu", "shopee", "walmart", "ebay", "aliexpress",
+    "lazada", "etsy", "shopify", "shein",
+}
+
+
+def normalize_tool_name(value: str) -> str:
+    """Normalize MCP tool names while retaining namespace words for scoring."""
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").lower()).strip("_")
+
+
+def tool_match_score(actual: str, required: str) -> int:
+    """Score a Sorftime tool candidate without crossing marketplace namespaces.
+
+    The former ``endswith(required)`` matcher could resolve ``product_detail`` to
+    ``tiktok_product_detail`` when TikTok tools appeared first in tools/list.
+    Exact Amazon/Sorftime candidates now win, and non-Amazon platform names are
+    rejected completely.
+    """
+    normalized = normalize_tool_name(actual)
+    tokens = set(normalized.split("_"))
+    if tokens & NON_AMAZON_TOOL_TOKENS:
+        return -1
+    if normalized == required:
+        return 100
+    if normalized == f"amazon_{required}":
+        return 98
+    if normalized == f"sorftime_{required}":
+        return 96
+    if normalized.endswith(f"_amazon_{required}"):
+        return 94
+    if normalized.endswith(f"_sorftime_{required}"):
+        return 92
+    if normalized.endswith(f"_{required}"):
+        return 80
+    return -1
+
+
 def build_tool_name_map(names: list[str]) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for required in REQUIRED_SORFTIME_TOOLS:
-        for actual in names:
-            normalized = actual.replace("-", "_").replace(".", "_").replace("/", "_")
-            if actual == required or normalized.endswith(required):
-                mapping[required] = actual
-                break
+        scored = [
+            (tool_match_score(actual, required), index, actual)
+            for index, actual in enumerate(names)
+        ]
+        scored = [item for item in scored if item[0] >= 0]
+        if scored:
+            # Highest semantic score wins; original tools/list order breaks ties.
+            _, _, actual = sorted(scored, key=lambda item: (-item[0], item[1]))[0]
+            mapping[required] = actual
     return mapping
 
 

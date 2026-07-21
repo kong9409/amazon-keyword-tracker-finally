@@ -7,12 +7,14 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from openpyxl import load_workbook
 
 import app
-from sorftime_adapter import SorftimeCliClient, SorftimeMcpClient
+import lark_writer
+from sorftime_adapter import SorftimeCliClient, SorftimeMcpClient, build_tool_name_map
 
 
 class FakeSorftimeClient(SorftimeMcpClient):
@@ -60,6 +62,83 @@ class FakeSorftimeClient(SorftimeMcpClient):
 
 
 class TrackerTests(unittest.TestCase):
+
+    def test_mcp_tool_mapping_never_routes_amazon_to_tiktok(self) -> None:
+        names = [
+            "tiktok_product_detail",
+            "tiktok_product_trend",
+            "temu_product_detail",
+            "amazon.product_detail",
+            "product_trend",
+            "product_traffic_terms",
+            "keyword_detail",
+            "keyword_search_results",
+            "product_report",
+            "product_ranking_trend_by_keyword",
+        ]
+        mapping = build_tool_name_map(names)
+        self.assertEqual(mapping["product_detail"], "amazon.product_detail")
+        self.assertEqual(mapping["product_trend"], "product_trend")
+        self.assertNotIn("tiktok", mapping["product_detail"].lower())
+        self.assertNotIn("temu", mapping["product_detail"].lower())
+
+
+    def test_feishu_base_link_and_missing_field_creation(self) -> None:
+        calls: list[tuple[str, str, dict | None]] = []
+
+        def fake_request(url, payload=None, headers=None, method="POST"):
+            calls.append((method, url, payload))
+            if url.endswith("/auth/v3/tenant_access_token/internal"):
+                return {"code": 0, "tenant_access_token": "tenant-token"}
+            if "/fields?page_size=100" in url:
+                return {"code": 0, "data": {"items": [{"field_name": "日期"}]}}
+            if url.endswith("/fields"):
+                return {"code": 0, "data": {"field": {"field_name": payload["field_name"]}}}
+            if url.endswith("/records/batch_create"):
+                return {"code": 0, "data": {"records": payload["records"]}}
+            raise AssertionError(url)
+
+        config = {
+            "feishu_app_id": "cli_demo",
+            "feishu_app_secret": "secret",
+            "base_url": "https://example.feishu.cn/base/bascnDemo?table=tblDemo",
+        }
+        with patch("lark_writer.request_json", side_effect=fake_request):
+            result = lark_writer.append_records_to_lark(
+                [{"date": "2026-07-21", "asin": "B000000001"}],
+                config,
+                [("date", "日期"), ("asin", "ASIN")],
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["written"], 1)
+        self.assertEqual(result["created_fields"], ["ASIN"])
+        self.assertTrue(any(url.endswith("/records/batch_create") for _, url, _ in calls))
+
+    def test_parse_feishu_wiki_and_base_links(self) -> None:
+        base = lark_writer.parse_bitable_url("https://x.feishu.cn/base/bascnABC?table=tbl123")
+        wiki = lark_writer.parse_bitable_url("https://x.feishu.cn/wiki/wikcnABC?table=tbl456")
+        self.assertEqual(base["app_token"], "bascnABC")
+        self.assertEqual(base["table_id"], "tbl123")
+        self.assertEqual(wiki["wiki_token"], "wikcnABC")
+        self.assertEqual(wiki["table_id"], "tbl456")
+
+    def test_output_mode_requires_feishu_configuration(self) -> None:
+        payload = {
+            "asins": ["B000000001"],
+            "keywords": ["shower door"],
+            "run_time": "09:00",
+            "delivery": "lark",
+            "lark": {"feishu_app_id": "", "feishu_app_secret": "", "base_url": ""},
+        }
+        with self.assertRaises(ValueError):
+            app.validate_payload(payload)
+        payload["lark"] = {
+            "feishu_app_id": "cli_demo",
+            "feishu_app_secret": "secret",
+            "base_url": "https://example.feishu.cn/base/bascnExample?table=tblExample",
+        }
+        app.validate_payload(payload)
+
     def test_field_fallbacks_and_cache_reduce_calls(self) -> None:
         client = FakeSorftimeClient()
         first = client.capture_keyword("B000000001", "under bed storage", "US")

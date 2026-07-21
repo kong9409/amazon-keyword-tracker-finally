@@ -1,124 +1,113 @@
-# Amazon Keyword Tracker · Zeabur 简化版
+# Amazon 关键词监控工具 by kong
 
-这是一个单一的 Zeabur 网页工具。使用者打开网页后：
+一个部署在 Zeabur 的 Amazon 关键词监控网页工具。每位使用者在页面自行选择 Sorftime **CLI** 或 **MCP**，输入 ASIN 和关键词后抓取数据，并选择：
 
-1. 选择 **CLI** 或 **MCP**。
-2. CLI 模式输入自己的 Sorftime `Account-SK`；MCP 模式输入 MCP URL 和 Bearer Token。
-3. 输入 ASIN、关键词和 Amazon 站点。
-4. 点击“开始抓取并导出”。
-5. 页面显示进度、接口调用次数和运行时间，完成后自动下载 Excel。
+- 下载 Excel
+- 写入飞书 Base
+- 下载 Excel + 写入飞书
 
-## CLI 和 MCP 的含义
+## 本版修复
 
-### CLI 模式
+- 修复 MCP `product_detail` 被错误路由到 `tiktok_product_detail` 的问题。
+- MCP 工具匹配会优先选择精确 Amazon 工具，并排除 TikTok、Temu、Shopee、Walmart 等平台前缀。
+- 修复 CLI/MCP 切换后隐藏字段仍显示、输入框高度和边框不一致的问题。
+- 工具名称统一为 **Amazon 关键词监控工具 by kong**。
+- 增加 Excel、飞书、Excel + 飞书三种输出方式。
+- 飞书只需输入 App ID、App Secret、Base 链接；工具可解析 Wiki/Base 链接、自动选择数据表并创建缺失字段。
+- 保留 Sorftime 接口次数、运行时间、进度、结果预览和 Excel 任务汇总。
 
-网页只要求输入 Sorftime `Account-SK`。Docker 容器内已经安装 `sorftime-cli`，后端只会执行固定命令：
+## 使用步骤
+
+1. 选择 `CLI（Account-SK）` 或 `MCP（URL + Token）`。
+2. 点击“测试连接”。
+3. 输入一个或多个 ASIN、关键词。
+4. 选择 Amazon 站点。
+5. 选择输出方式。
+6. 需要飞书时，填写 App ID、App Secret 和 Base 数据表链接。
+7. 点击“开始抓取”。
+
+## MCP 与 CLI 怎么选
+
+当前 17 字段监控默认推荐 MCP：
 
 ```text
-sorftime add keyword-tracker <Account-SK>
-sorftime use keyword-tracker
-sorftime api ASINRequestKeywordv2 ...
-sorftime api ProductRequest ...
+product_traffic_terms
+keyword_detail
+keyword_search_results（自然 positionType=0 / 广告 positionType=2）
+product_ranking_trend_by_keyword
+product_detail
+product_report
+product_trend
 ```
 
-网页不会接受或执行用户填写的 Shell 命令。
-
-### MCP 模式
-
-默认 MCP 地址：
+CLI 更适合大量批量采集，当前使用：
 
 ```text
-https://mcp.sorftime.com/
+ASINRequestKeywordv2
+KeywordRequest
+ProductRequest
 ```
 
-用户填写自己的 Bearer Token / Account-SK。后端按照标准 MCP 流程初始化并调用 Sorftime 工具。
+完整字段对应见：
+
+```text
+MCP_CLI_FIELD_MAPPING.md
+Amazon关键词监控_MCP_CLI字段对应表_by_kong.xlsx
+```
+
+## 飞书配置
+
+企业自建应用至少需要开通多维表格读取/写入相关权限，并把应用添加为目标 Base 的协作者。页面填写：
+
+```text
+App ID
+App Secret
+Base 链接（建议复制到具体数据表，链接中包含 table=tbl...）
+```
+
+工具会：
+
+1. 获取 tenant_access_token。
+2. 如果粘贴的是 Wiki 链接，解析为 Base app_token。
+3. 如果链接不含 table_id，选择 Base 中第一张表。
+4. 检查字段并创建缺失字段。
+5. 每批最多 500 条写入。
+
+App Secret 不会写入任务 JSON。
 
 ## Zeabur 部署
 
-把项目文件直接放在 GitHub 仓库根目录，确保根目录存在：
+把项目文件放到 GitHub 仓库根目录，确保存在：
 
 ```text
 Dockerfile
 app.py
 sorftime_adapter.py
+lark_writer.py
 requirements.txt
 static/
 ```
 
-然后在 Zeabur 重新部署即可。
+Zeabur 不需要手动设置 `APP_MODE`、`HOST`、`PORT` 或 `python app.py` 变量。Dockerfile 会启动应用，Zeabur 自动注入 `PORT`。
 
-### Zeabur 变量
-
-这个版本不需要手动新增以下变量：
-
-```text
-APP_MODE
-HOST
-PORT
-python app.py
-SORFTIME_MCP_URL
-SORFTIME_API_KEY
-```
-
-特别注意：`python app.py` 是启动命令，不是环境变量。Dockerfile 已经包含启动命令；Zeabur 会自动提供 `PORT`，程序会监听 `0.0.0.0:$PORT`。
-
-部署后访问：
+健康检查：
 
 ```text
 https://你的域名/api/health
 ```
 
-正常返回应包含：
-
-```json
-{
-  "ok": true,
-  "mode": "hosted",
-  "hosted": true,
-  "supports_cli": true
-}
-```
-
 ## 输出字段
-
-Excel 和网页固定显示：
 
 ```text
 日期、ASIN、关键词、流量占比、ABA热度、搜索量、自然位、广告位、价格、优惠券、秒杀价、Prime价、月销量、大类排名、评分、评价数、链接
 ```
 
-Excel 另有“任务汇总”工作表，包含接口调用总次数、运行时间、各接口调用次数与累计耗时。
-
-## 数据接口
-
-CLI 模式主要使用：
-
-- `ASINRequestKeywordv2`：ASIN 关键词、流量占比、排名、搜索热度等。
-- `ProductRequest`：价格、促销、销量、排名、评分和评价数等。
-
-MCP 模式根据可用工具使用：
-
-- `product_traffic_terms`
-- `keyword_detail`
-- `keyword_search_results`
-- `product_ranking_trend_by_keyword`
-- `product_detail`
-- `product_report`
-- `product_trend`
-
-同一批任务会缓存关键词、搜索结果和产品数据，避免重复调用。
-
-## 安全说明
-
-- Account-SK、Token 和 MCP URL 不写入 GitHub。
-- Zeabur 网页模式不把连接凭证保存到任务 JSON 或数据库。
-- CLI 模式使用临时配置目录，任务结束后删除。
-- 不支持用户输入任意 CLI/Shell 命令，避免远程命令执行风险。
+活动相关字段只有在 Sorftime 实际返回时才会写入；没有数据时保持空白并在备注中说明，不生成虚假值。
 
 ## 测试
 
 ```bash
 python -m unittest discover -s tests -v
 node --check static/app.js
-python -m py_compile app.py sorftime_adapter.py
+python -m py_compile app.py sorftime_adapter.py lark_writer.py
 ```

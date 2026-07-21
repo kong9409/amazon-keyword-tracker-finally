@@ -56,6 +56,29 @@
     setConnectionState("disconnected", isMcp ? "填写 MCP URL 和 Token" : "填写 Sorftime Account-SK");
   }
 
+  function showOutputFields() {
+    const mode = $("outputMode").value;
+    const needsFeishu = mode === "lark" || mode === "both";
+    const hasExcel = mode === "excel" || mode === "both";
+    $("feishuFields").hidden = !needsFeishu;
+    [$("feishuAppId"), $("feishuAppSecret"), $("feishuBaseUrl")].forEach(input => {
+      input.required = needsFeishu;
+    });
+
+    const checkbox = $("autoDownload");
+    const card = $("autoDownloadCard");
+    if (!hasExcel) {
+      checkbox.dataset.previousChecked = String(checkbox.checked);
+      checkbox.checked = false;
+      checkbox.disabled = true;
+      card.classList.add("is-disabled");
+    } else {
+      checkbox.disabled = false;
+      if (checkbox.dataset.previousChecked === "true") checkbox.checked = true;
+      card.classList.remove("is-disabled");
+    }
+  }
+
   function setConnectionState(state, detail) {
     const connected = state === "connected";
     const testing = state === "testing";
@@ -79,7 +102,8 @@
   function captureFormData() {
     const data = new FormData(form);
     data.set("owner_id", ownerId);
-    data.set("auto_download", $("autoDownload").checked ? "true" : "false");
+    data.set("outputMode", $("outputMode").value);
+    data.set("auto_download", (!$("autoDownload").disabled && $("autoDownload").checked) ? "true" : "false");
     data.set("daily_enabled", "false");
     data.set("remember_connection", "false");
     return data;
@@ -118,12 +142,13 @@
 
   function setProgress(job) {
     const statusText = {
-      queued: "任务排队中", running: "正在抓取关键词数据", saving: "正在生成 Excel",
-      completed: "抓取完成", completed_with_warning: "抓取完成", failed: "任务失败"
+      queued: "任务排队中", running: "正在抓取关键词数据", saving: "正在输出结果",
+      completed: "抓取完成", completed_with_warning: "抓取完成（有提示）", failed: "任务失败"
     }[job.status] || "任务处理中";
     const percent = Number(job.percent || 0);
     $("progressTitle").textContent = statusText;
-    $("progressSub").textContent = job.error || (job.status === "completed" ? "结果已生成。" : "正在调用 Sorftime 数据接口。");
+    const larkMessage = job.lark && job.lark.message ? job.lark.message : "";
+    $("progressSub").textContent = job.error || larkMessage || (["completed", "completed_with_warning"].includes(job.status) ? "结果已生成。" : "正在调用 Sorftime Amazon 数据接口。");
     $("progressPct").textContent = `${percent}%`;
     $("progressFill").style.width = `${Math.max(0, Math.min(100, percent))}%`;
     $("mcpCalls").textContent = String(job.mcp_calls || 0);
@@ -136,6 +161,10 @@
     $("logBox").scrollTop = $("logBox").scrollHeight;
     const links = [];
     if (job.excel) links.push(`<a href="${escapeHtml(job.excel)}" download>下载 Excel</a>`);
+    if (job.lark && job.lark.message) {
+      const cls = job.lark.ok ? "lark-result" : "lark-result lark-error";
+      links.push(`<span class="${cls}">${escapeHtml(job.lark.message)}</span>`);
+    }
     $("resultLinks").innerHTML = links.join("");
   }
 
@@ -177,16 +206,26 @@
       setProgress(job);
       if (["completed", "completed_with_warning"].includes(job.status)) {
         runButton.disabled = false;
-        runButton.textContent = "开始抓取并导出";
+        runButton.textContent = "开始抓取";
         const results = await api(`/api/jobs/${encodeURIComponent(jobId)}/results`);
         renderRows(results.records || []);
         if (job.auto_download && job.excel) downloadFile(job.excel);
-        toast(job.auto_download ? "抓取完成，Excel 已开始下载" : "抓取完成");
+        if (job.lark && !job.lark.ok) {
+          toast(`抓取完成，但飞书写入失败：${job.lark.message || "请检查配置"}`, true);
+        } else if (job.auto_download && job.excel && job.lark && job.lark.ok) {
+          toast("抓取完成，Excel 已下载并写入飞书");
+        } else if (job.auto_download && job.excel) {
+          toast("抓取完成，Excel 已开始下载");
+        } else if (job.lark && job.lark.ok) {
+          toast("抓取完成，数据已写入飞书");
+        } else {
+          toast("抓取完成");
+        }
         return;
       }
       if (job.status === "failed") {
         runButton.disabled = false;
-        runButton.textContent = "开始抓取并导出";
+        runButton.textContent = "开始抓取";
         toast(job.error || "任务失败", true);
         return;
       }
@@ -218,6 +257,7 @@
 
   $("testConnection").addEventListener("click", testConnection);
   $("sorftimeMode").addEventListener("change", showConnectionFields);
+  $("outputMode").addEventListener("change", showOutputFields);
   $("refreshHistory").addEventListener("click", () => loadHistory(true));
 
   async function initialize() {
@@ -228,6 +268,7 @@
       toast(`服务检查失败：${error.message}`, true);
     }
     showConnectionFields();
+    showOutputFields();
     await loadHistory(false);
   }
 

@@ -342,11 +342,11 @@ def make_workbook(records: list[dict[str, Any]], stats: dict[str, Any]) -> bytes
     summary_rows = [
         ["指标", "数值"],
         ["记录数", len(records)],
-        ["MCP调用总次数", stats.get("mcp_calls", 0)],
+        ["Sorftime接口调用总次数", stats.get("mcp_calls", 0)],
         ["运行时间（秒）", stats.get("elapsed_seconds", 0)],
         ["生成时间", now_local().isoformat(timespec="seconds")],
         [],
-        ["MCP工具", "调用次数", "耗时（秒）"],
+        ["Sorftime接口", "调用次数", "耗时（秒）"],
     ]
     summary.append(summary_rows[0])
     for row in summary_rows[1:]:
@@ -542,6 +542,20 @@ def validate_payload(payload: dict[str, Any], require_inputs: bool = True) -> No
         raise ValueError("请至少输入或上传 1 个关键词")
     if not re.fullmatch(r"\d{2}:\d{2}", payload.get("run_time", "")):
         raise ValueError("每日运行时间格式应为 HH:MM")
+    delivery = str(payload.get("delivery") or "excel").lower()
+    if delivery not in {"excel", "lark", "both"}:
+        raise ValueError("输出方式只能选择 Excel、飞书或 Excel + 飞书")
+    if delivery in {"lark", "both"}:
+        lark = payload.get("lark") or {}
+        missing = []
+        if not str(lark.get("feishu_app_id") or "").strip():
+            missing.append("App ID")
+        if not str(lark.get("feishu_app_secret") or "").strip():
+            missing.append("App Secret")
+        if not str(lark.get("base_url") or "").strip():
+            missing.append("Base 链接")
+        if missing:
+            raise ValueError("选择写入飞书后，请填写：" + "、".join(missing))
 
 
 def resolve_payload_connection(payload: dict[str, Any], *, for_daily: bool = False) -> dict[str, Any]:
@@ -744,25 +758,38 @@ def run_capture_job(job_id: str, payload: dict[str, Any]) -> None:
             write_json_atomic(job_path(job_id), job)
 
         records, stats = run_capture_records(payload, progress)
+        delivery = payload.get("delivery", "excel")
         job.update({"status": "saving", "percent": 88, "records_count": len(records)})
-        append_job_log(job, "正在生成 Excel 文件。")
+        if delivery == "excel":
+            append_job_log(job, "正在生成 Excel 文件。")
+        elif delivery == "lark":
+            append_job_log(job, "正在写入飞书 Base。")
+        else:
+            append_job_log(job, "正在生成 Excel 并写入飞书 Base。")
         write_json_atomic(job_path(job_id), job)
 
-        output_name = f"amazon-keyword-tracker-{now_local().strftime('%Y%m%d-%H%M%S')}.xlsx"
-        excel_url, local_excel_path = write_excel_exports(make_workbook(records, stats), output_name, payload)
+        excel_url = ""
+        local_excel_path = ""
+        if delivery in {"excel", "both"}:
+            output_name = f"amazon-keyword-tracker-{now_local().strftime('%Y%m%d-%H%M%S')}.xlsx"
+            excel_url, local_excel_path = write_excel_exports(
+                make_workbook(records, stats), output_name, payload
+            )
 
         lark_result = None
-        if payload.get("delivery") in {"lark", "both"}:
+        if delivery in {"lark", "both"}:
             lark_result = append_records_to_lark(records, payload.get("lark", {}), FIELD_COLUMNS)
+            append_job_log(job, (lark_result or {}).get("message", "飞书写入已完成。"))
 
         job.update({
             "status": "completed" if not lark_result or lark_result.get("ok") else "completed_with_warning",
             "percent": 100,
             "done": len(payload["asins"]) * len(payload["keywords"]),
             "records_count": len(records),
+            "delivery": delivery,
             "excel": excel_url,
             "local_excel_path": local_excel_path,
-            "auto_download": payload.get("auto_download", True),
+            "auto_download": bool(payload.get("auto_download", True) and excel_url),
             "mcp_calls": stats.get("mcp_calls", 0),
             "elapsed_seconds": stats.get("elapsed_seconds", round(time.perf_counter() - started, 2)),
             "tool_calls": stats.get("tool_calls", {}),
@@ -771,7 +798,7 @@ def run_capture_job(job_id: str, payload: dict[str, Any]) -> None:
             "finished_at": now_local().isoformat(timespec="seconds"),
             "records": records,
         })
-        append_job_log(job, f"完成：{len(records)} 条，MCP {job['mcp_calls']} 次，用时 {job['elapsed_seconds']} 秒。")
+        append_job_log(job, f"完成：{len(records)} 条，Sorftime 接口 {job['mcp_calls']} 次，用时 {job['elapsed_seconds']} 秒。")
         write_json_atomic(job_path(job_id), job)
     except Exception as exc:
         job.update({
@@ -831,8 +858,11 @@ def scheduler_loop() -> None:
                     if not payload.get("connection"):
                         raise RuntimeError("本机 Sorftime 连接已被删除，请重新连接后保存每日任务")
                     records, stats = run_capture_records(payload)
-                    filename = f"daily-keyword-tracker-{config['owner_id']}-{now.strftime('%Y%m%d-%H%M%S')}.xlsx"
-                    excel_url, local_excel_path = write_excel_exports(make_workbook(records, stats), filename, payload)
+                    excel_url = ""
+                    local_excel_path = ""
+                    if payload.get("delivery", "excel") in {"excel", "both"}:
+                        filename = f"daily-keyword-tracker-{config['owner_id']}-{now.strftime('%Y%m%d-%H%M%S')}.xlsx"
+                        excel_url, local_excel_path = write_excel_exports(make_workbook(records, stats), filename, payload)
                     if payload.get("delivery") in {"lark", "both"}:
                         append_records_to_lark(records, payload.get("lark", {}), FIELD_COLUMNS)
                     config.update({

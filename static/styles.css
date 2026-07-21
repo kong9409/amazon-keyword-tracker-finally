@@ -104,3 +104,27 @@ tbody tr:hover { background: #eaf8f7; }
 .simple-settings { grid-template-columns: minmax(220px, 360px) minmax(280px, 1fr); align-items: end; }
 .compact-check { min-height: 72px; align-items: center; }
 @media (max-width: 900px) { .simple-settings { grid-template-columns: 1fr; } }
+
+/* Layout corrections: the native hidden attribute must always beat .control display:flex. */
+[hidden] { display: none !important; }
+.brand-by { display: inline-block; font-size: .38em; font-weight: 800; color: var(--primary); letter-spacing: .2px; vertical-align: .28em; }
+.setting-card { min-width: 0; min-height: 126px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: #f8fbfd; justify-content: flex-start; }
+.setting-card > input,
+.setting-card > select { margin-top: 2px; }
+.connection-grid { align-items: stretch; }
+.connection-grid .setting-card { background: rgba(255,255,255,.7); border-color: #cfe2e8; }
+.output-section { margin-top: 22px; padding-top: 22px; border-top: 1px solid #e6edf3; }
+.output-title { margin-bottom: 14px; }
+.output-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; }
+.feishu-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; margin-top: 16px; padding: 18px; border: 1px solid #cfe2e8; border-radius: 16px; background: linear-gradient(135deg, #f8fcfd, #eff9f8); }
+.auto-download-card { min-height: 126px; align-items: center; }
+.auto-download-card input { flex: 0 0 auto; }
+.auto-download-card.is-disabled { opacity: .55; background: #f1f5f9; }
+.auto-download-card.is-disabled input { cursor: not-allowed; }
+.result-links .lark-result { display: inline-flex; padding: 10px 14px; border-radius: 10px; background: #e8f7ee; color: #087f5b; font-weight: 800; }
+.result-links .lark-error { background: #fff0e6; color: #a33b13; }
+
+@media (max-width: 1080px) {
+  .output-grid, .feishu-grid { grid-template-columns: 1fr; }
+  .setting-card { min-height: auto; }
+}

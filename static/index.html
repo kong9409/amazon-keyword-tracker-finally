@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Amazon 关键词监控工具</title>
+  <title>Amazon 关键词监控工具 by kong</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -11,8 +11,8 @@
     <header class="hero">
       <div>
         <p class="eyebrow">SORFTIME · AMAZON KEYWORD TRACKER</p>
-        <h1>Amazon 关键词监控工具</h1>
-        <p class="hero-copy">输入自己的 Sorftime CLI Account-SK 或 MCP 连接，再填写 ASIN 和关键词即可抓取。无需在 Zeabur 配置 Sorftime 环境变量。</p>
+        <h1>Amazon 关键词监控工具 <span class="brand-by">by kong</span></h1>
+        <p class="hero-copy">输入自己的 Sorftime CLI Account-SK 或 MCP 连接，再填写 ASIN 和关键词即可抓取；结果可下载 Excel、写入飞书，或同时输出。</p>
       </div>
       <div class="source-pill source-off" id="sourceBadge">Sorftime 未连接</div>
     </header>
@@ -29,27 +29,30 @@
         </div>
 
         <div class="form-grid connection-grid">
-          <label class="control">
+          <label class="control setting-card">
             <span>连接方式</span>
             <select name="sorftime_mode" id="sorftimeMode">
-              <option value="cli_account" selected>CLI（输入 Account-SK）</option>
+              <option value="cli_account" selected>CLI（Account-SK）</option>
               <option value="mcp_url">MCP（URL + Token）</option>
             </select>
+            <small>CLI 适合批量；MCP 适合当前关键词排名和多接口组合。</small>
           </label>
 
-          <label class="control span-three" id="cliAccountField">
+          <label class="control setting-card span-three" id="cliAccountField">
             <span>Sorftime Account-SK</span>
             <input name="sorftime_cli_account_sk" id="sorftimeCliAccountSk" type="password" autocomplete="off" placeholder="粘贴 Sorftime Account-SK" />
-            <small>服务器使用已安装的官方 sorftime-cli 调用固定数据接口，不执行用户输入的命令。</small>
+            <small>服务器使用已安装的 sorftime-cli 调用固定 Amazon 接口，不执行用户输入的系统命令。</small>
           </label>
 
-          <label class="control span-two" id="mcpUrlField" hidden>
+          <label class="control setting-card span-two" id="mcpUrlField" hidden>
             <span>Sorftime MCP URL</span>
             <input name="sorftime_mcp_url" id="sorftimeMcpUrl" autocomplete="off" value="https://mcp.sorftime.com/" placeholder="https://mcp.sorftime.com/" />
+            <small>默认使用 Sorftime 官方 MCP 地址。</small>
           </label>
-          <label class="control" id="mcpTokenField" hidden>
+          <label class="control setting-card" id="mcpTokenField" hidden>
             <span>Bearer Token / Account-SK</span>
             <input name="sorftime_mcp_token" id="sorftimeMcpToken" type="password" autocomplete="off" placeholder="粘贴 Token" />
+            <small>仅随本次请求发送，不写入任务文件。</small>
           </label>
         </div>
         <div class="connection-footer">
@@ -72,37 +75,74 @@
             <label for="keywordsText">STEP 3 · 关键词</label>
             <a href="/api/template?kind=keywords">下载模板</a>
           </div>
-          <textarea id="keywordsText" name="keywords_text" rows="7" placeholder="每行一个关键词，例如：&#10;under bed storage&#10;storage containers"></textarea>
+          <textarea id="keywordsText" name="keywords_text" rows="7" placeholder="每行一个关键词，例如：&#10;shower door&#10;frameless shower door"></textarea>
           <input type="file" name="keywords_file" accept=".xlsx,.csv,.txt" />
         </div>
       </section>
 
-      <section class="form-grid settings-grid simple-settings">
-        <label class="control">
-          <span>Amazon 站点</span>
-          <select name="marketplace" id="marketplace">
-            <option value="US">Amazon US</option>
-            <option value="CA">Amazon CA</option>
-            <option value="UK">Amazon UK</option>
-            <option value="DE">Amazon DE</option>
-            <option value="FR">Amazon FR</option>
-            <option value="IT">Amazon IT</option>
-            <option value="ES">Amazon ES</option>
-            <option value="JP">Amazon JP</option>
-            <option value="AU">Amazon AU</option>
-          </select>
-        </label>
-        <label class="check-card compact-check">
-          <input type="checkbox" name="auto_download" id="autoDownload" checked />
-          <span><strong>完成后自动下载 Excel</strong><small>结果仍会保留“再次下载”链接。</small></span>
-        </label>
+      <section class="output-section">
+        <div class="section-head output-title">
+          <div>
+            <p class="eyebrow">STEP 4 · 输出设置</p>
+            <h2>选择站点与输出位置</h2>
+          </div>
+        </div>
+        <div class="form-grid output-grid">
+          <label class="control setting-card">
+            <span>Amazon 站点</span>
+            <select name="marketplace" id="marketplace">
+              <option value="US">Amazon US</option>
+              <option value="CA">Amazon CA</option>
+              <option value="UK">Amazon UK</option>
+              <option value="DE">Amazon DE</option>
+              <option value="FR">Amazon FR</option>
+              <option value="IT">Amazon IT</option>
+              <option value="ES">Amazon ES</option>
+              <option value="JP">Amazon JP</option>
+              <option value="AU">Amazon AU</option>
+            </select>
+            <small>站点会传入 Sorftime 的 Amazon domain / marketplace 参数。</small>
+          </label>
+
+          <label class="control setting-card">
+            <span>结果输出方式</span>
+            <select name="outputMode" id="outputMode">
+              <option value="excel" selected>下载 Excel</option>
+              <option value="lark">写入飞书</option>
+              <option value="both">下载 Excel + 写入飞书</option>
+            </select>
+            <small>选择飞书后，下方填写每个公司的应用与 Base 信息。</small>
+          </label>
+
+          <label class="check-card setting-card auto-download-card" id="autoDownloadCard">
+            <input type="checkbox" name="auto_download" id="autoDownload" checked />
+            <span><strong>完成后自动下载 Excel</strong><small>浏览器会自动开始下载，同时保留“再次下载”链接。</small></span>
+          </label>
+        </div>
+
+        <div class="form-grid feishu-grid" id="feishuFields" hidden>
+          <label class="control setting-card">
+            <span>飞书 App ID</span>
+            <input name="feishu_app_id" id="feishuAppId" autocomplete="off" placeholder="cli_xxxxxxxxxxxxxxxx" />
+            <small>填写有多维表格读写权限的企业自建应用 App ID。</small>
+          </label>
+          <label class="control setting-card">
+            <span>飞书 App Secret</span>
+            <input name="feishu_app_secret" id="feishuAppSecret" type="password" autocomplete="off" placeholder="粘贴 App Secret" />
+            <small>仅用于本次获取 tenant_access_token，不写入任务文件。</small>
+          </label>
+          <label class="control setting-card">
+            <span>飞书 Base 链接</span>
+            <input name="base_url" id="feishuBaseUrl" autocomplete="off" placeholder="https://xxx.feishu.cn/base/...?...table=tbl..." />
+            <small>可粘贴 Base 或 Wiki 中的多维表格链接；缺失字段会自动创建。</small>
+          </label>
+        </div>
       </section>
 
-      <input type="hidden" name="outputMode" value="excel" />
       <input type="hidden" name="daily_enabled" value="false" />
       <input type="hidden" name="remember_connection" value="false" />
       <div class="actions">
-        <button type="submit" class="primary" id="runCapture">开始抓取并导出</button>
+        <button type="submit" class="primary" id="runCapture">开始抓取</button>
       </div>
     </form>
 
@@ -117,7 +157,7 @@
       </div>
       <div class="progress-track"><div id="progressFill"></div></div>
       <div class="metric-grid">
-        <article><span>接口调用次数</span><strong id="mcpCalls">0</strong></article>
+        <article><span>Sorftime 接口调用次数</span><strong id="mcpCalls">0</strong></article>
         <article><span>运行时间</span><strong id="elapsedTime">0.00 秒</strong></article>
         <article><span>已完成</span><strong id="doneCount">0 / 0</strong></article>
         <article><span>结果条数</span><strong id="recordCount">0</strong></article>
