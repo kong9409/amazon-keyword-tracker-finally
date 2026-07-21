@@ -122,3 +122,14 @@ python -m py_compile app.py sorftime_adapter.py lark_writer.py
 - 飞书 403：App ID/Secret 并不等于文档权限。请开通 `bitable:app`、发布审批，并把应用加入目标 Base 协作者；高级权限 Base 还要给应用所在角色读写权限。
 - MCP 全字段空白：新版已支持 MCP `structuredContent`、代码块 JSON、实时 inputSchema 参数适配和字段别名解析。若账户次数不足或套餐无接口权限，会直接显示实际错误。
 - 详细说明见 `V3_FIX_NOTES.md`、`FIX_NOTES.md` 与 `FEISHU_PERMISSION_CHECKLIST.md`。
+
+## V4：飞书字段转换与固定指标来源
+
+- 修复飞书 `TextFieldConvFail`：按目标 Base 字段类型转换后写入。
+- 流量占比只取 `product_traffic_terms`。
+- ABA热度、搜索量只取 `keyword_detail`。
+- 月销量只按 `product_detail → product_trend(SalesVolume)`。
+- 大类排名只按 `product_detail → product_trend(Rank/Ranking)`。
+- 不再使用 `product_report` 填充以上指标。
+
+详见 `V4_FIX_NOTES.md`。

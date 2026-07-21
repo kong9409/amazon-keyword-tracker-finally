@@ -18,3 +18,15 @@
 | 链接 | ASIN + 站点生成 | ASIN + 站点生成 |
 
 Sorftime 某接口未返回某字段时，单元格保留为空并在“状态/备注”中说明；不会填充模拟数据。
+
+## V4 固定来源覆盖规则
+
+| 字段 | 主接口 | 备用接口 |
+|---|---|---|
+| 流量占比 | `product_traffic_terms` | 无 |
+| ABA热度 | `keyword_detail` | 无 |
+| 搜索量 | `keyword_detail` | 无 |
+| 月销量 | `product_detail` | `product_trend`，类型 `SalesVolume` |
+| 大类排名 | `product_detail` | `product_trend`，类型 `Rank` 或 `Ranking` |
+
+V4 已移除 `product_report` 对以上字段的填充，避免跨接口取错值。

@@ -15,7 +15,7 @@ from openpyxl import load_workbook
 import app
 import lark_writer
 from sorftime_adapter import (
-    SorftimeCliClient, SorftimeMcpClient, adapt_tool_arguments, build_tool_name_map,
+    SorftimeCliClient, SorftimeMcpClient, adapt_schema_value, adapt_tool_arguments, build_tool_name_map,
     find_value, parse_tool_result, validate_sorftime_payload,
     PRICE_KEYS, SALES_KEYS, RATING_KEYS, REVIEW_KEYS,
 )
@@ -78,6 +78,16 @@ class TrackerTests(unittest.TestCase):
         parsed2 = parse_tool_result(fenced)
         self.assertEqual(find_value(parsed2, RATING_KEYS), 4.7)
         self.assertEqual(find_value(parsed2, REVIEW_KEYS), 1234)
+
+    def test_product_trend_enum_alias_uses_live_schema(self) -> None:
+        self.assertEqual(
+            adapt_schema_value(
+                "productTrendType",
+                "Rank",
+                {"type": "string", "enum": ["SalesVolume", "SalesAmount", "Price", "Ranking"]},
+            ),
+            "Ranking",
+        )
 
     def test_mcp_arguments_follow_live_input_schema(self) -> None:
         schema = {
@@ -199,6 +209,55 @@ class TrackerTests(unittest.TestCase):
         self.assertIn("跳过自动建字段", result["message"])
         self.assertTrue(any(url.endswith("/records/batch_create") for url in calls))
 
+    def test_feishu_text_fields_are_always_serialized_as_strings(self) -> None:
+        captured_payloads: list[dict] = []
+
+        def fake_request(url, payload=None, headers=None, method="POST"):
+            if url.endswith("/auth/v3/tenant_access_token/internal"):
+                return {"code": 0, "tenant_access_token": "tenant-token"}
+            if "/fields?page_size=100" in url:
+                return {
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {"field_name": "日期", "type": 1},
+                            {"field_name": "月销量", "type": 1},
+                            {"field_name": "评分", "type": 1},
+                        ]
+                    },
+                }
+            if url.endswith("/records/batch_create"):
+                captured_payloads.append(payload)
+                return {"code": 0, "data": {"records": payload["records"]}}
+            raise AssertionError(url)
+
+        with patch("lark_writer.request_json", side_effect=fake_request):
+            result = lark_writer.append_records_to_lark(
+                [{"date": "2026-07-21", "estimated_sales": 1234, "rating": 4.7}],
+                {
+                    "feishu_app_id": "cli_demo",
+                    "feishu_app_secret": "secret",
+                    "base_url": "https://example.feishu.cn/base/bascnDemo?table=tblDemo",
+                },
+                [("date", "日期"), ("estimated_sales", "月销量"), ("rating", "评分")],
+            )
+        self.assertTrue(result["ok"])
+        fields = captured_payloads[0]["records"][0]["fields"]
+        self.assertEqual(fields["月销量"], "1234")
+        self.assertEqual(fields["评分"], "4.7")
+
+    def test_feishu_number_field_omits_empty_and_parses_number(self) -> None:
+        field_columns = [("estimated_sales", "月销量"), ("product_rank", "大类排名")]
+        fields = lark_writer.build_record_fields(
+            {"estimated_sales": "1,234", "product_rank": ""},
+            field_columns,
+            {
+                "月销量": {"field_name": "月销量", "type": 2},
+                "大类排名": {"field_name": "大类排名", "type": 2},
+            },
+        )
+        self.assertEqual(fields, {"月销量": 1234})
+
     def test_feishu_base_link_and_missing_field_creation(self) -> None:
         calls: list[tuple[str, str, dict | None]] = []
 
@@ -254,6 +313,56 @@ class TrackerTests(unittest.TestCase):
             "base_url": "https://example.feishu.cn/base/bascnExample?table=tblExample",
         }
         app.validate_payload(payload)
+
+    def test_v4_strict_metric_sources_and_product_trend_fallbacks(self) -> None:
+        class StrictSourceClient(SorftimeMcpClient):
+            def __init__(self) -> None:
+                super().__init__("https://example.invalid/mcp")
+                self.seen = []
+
+            def _ensure_initialized(self) -> None:
+                self._initialized = True
+
+            def call_tool(self, name, arguments):
+                self.seen.append((name, dict(arguments)))
+                if name == "product_traffic_terms":
+                    return {"Data": [{"KeywordName": "shower door", "TrafficRate": "8.8%"}]}
+                if name == "keyword_detail":
+                    return {"Data": {"keyword": "shower door", "Rank": 456, "monthlySearchVolume": 9999}}
+                if name == "keyword_search_results":
+                    if arguments["positionType"] == 0:
+                        return {"Data": [{"asin": "B000000001", "position": 6}]}
+                    return {"Data": []}
+                if name == "product_detail":
+                    return {"Data": {"price": 49.99, "rating": 4.5, "reviewCount": 321}}
+                if name == "product_trend":
+                    trend_type = arguments["productTrendType"]
+                    if trend_type == "SalesVolume":
+                        return {"Data": [{"recordDate": "2026-07", "MonthSalesVolume": 777}]}
+                    if trend_type == "Rank":
+                        return {}
+                    if trend_type == "Ranking":
+                        return {"Data": [{"recordDate": "2026-07", "MainCategoryRank": 888}]}
+                    if trend_type == "Price":
+                        return {}
+                    return {}
+                if name == "product_ranking_trend_by_keyword":
+                    return {}
+                raise AssertionError((name, arguments))
+
+        client = StrictSourceClient()
+        result = client.capture_keyword("B000000001", "shower door", "US")
+        self.assertEqual(result["traffic_share"], "8.8%")
+        self.assertEqual(result["aba_rank"], 456)
+        self.assertEqual(result["search_volume"], 9999)
+        self.assertEqual(result["estimated_sales"], 777)
+        self.assertEqual(result["product_rank"], 888)
+        calls = [name for name, _ in client.seen]
+        self.assertNotIn("product_report", calls)
+        self.assertIn("product_traffic_terms", calls)
+        self.assertIn("keyword_detail", calls)
+        self.assertIn("product_detail", calls)
+        self.assertGreaterEqual(calls.count("product_trend"), 3)
 
     def test_field_fallbacks_and_cache_reduce_calls(self) -> None:
         client = FakeSorftimeClient()

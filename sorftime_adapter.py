@@ -23,7 +23,6 @@ EMPTY = (None, "", [], {})
 
 REQUIRED_SORFTIME_TOOLS = {
     "product_traffic_terms",
-    "product_report",
     "keyword_detail",
     "keyword_search_results",
     "product_ranking_trend_by_keyword",
@@ -55,7 +54,6 @@ class SorftimeMcpClient:
 
     Data-source mapping follows the uploaded 86-tool matrix:
     - product_traffic_terms: ASIN-specific traffic terms and recent exposure data
-    - product_report: traffic-analysis fallback when the traffic row has no share field
     - keyword_detail: keyword ABA/search-volume metrics
     - keyword_search_results(positionType=0/2): current organic/ad result position
     - product_ranking_trend_by_keyword: organic rank fallback
@@ -105,15 +103,25 @@ class SorftimeMcpClient:
             }
 
     def capture_keyword(self, asin: str, keyword: str, marketplace: str) -> dict[str, Any]:
+        """Collect one ASIN × keyword row with strict, user-approved sources.
+
+        V4 source contract:
+        - traffic_share: product_traffic_terms only
+        - aba_rank/search_volume: keyword_detail only
+        - estimated_sales: product_detail -> product_trend(SalesVolume)
+        - product_rank: product_detail -> product_trend(Rank/Ranking)
+        Other product metrics come from product_detail, while organic/ad positions
+        keep their dedicated search-result/ranking fallbacks.
+        """
         self._ensure_initialized()
         site = normalize_marketplace(marketplace)
         asin = asin.strip().upper()
         keyword = keyword.strip()
-
         raw: dict[str, Any] = {}
 
         traffic_row = self.find_traffic_term(asin, keyword, site)
         raw["product_traffic_terms_match"] = traffic_row
+        traffic_share = extract_traffic_share(traffic_row)
 
         organic_position = first_non_empty(
             find_value(traffic_row, ORGANIC_POSITION_KEYS),
@@ -132,8 +140,6 @@ class SorftimeMcpClient:
             traffic_row.get("最近广告曝光时间", ""),
         )
 
-        # Current result position is independently queried when the traffic-term row
-        # does not contain a usable organic/ad position.
         if organic_position in EMPTY:
             organic_match = self.find_in_keyword_results(asin, keyword, site, position_type=0)
             raw["keyword_search_results_organic"] = organic_match
@@ -142,52 +148,20 @@ class SorftimeMcpClient:
             ad_match = self.find_in_keyword_results(asin, keyword, site, position_type=2)
             raw["keyword_search_results_ad"] = ad_match
             ad_position = extract_result_position(ad_match, self.search_page_size)
-
-        # Ranking trend is a final organic fallback, not a default call.
         if organic_position in EMPTY:
             ranking = self.ranking_trend(asin, keyword, site)
             raw["product_ranking_trend_by_keyword"] = ranking
             organic_position = extract_keyword_rank(ranking)
             organic_time = first_non_empty(organic_time, extract_latest_date(ranking))
 
-        traffic_share = find_value(traffic_row, TRAFFIC_SHARE_KEYS)
-        aba_rank = find_value(traffic_row, ABA_RANK_KEYS)
-        search_volume = find_value(traffic_row, SEARCH_VOLUME_KEYS)
-
-        # product_report is the matrix-defined comprehensive product report and
-        # includes traffic-term analysis. Call it lazily only when the matched
-        # traffic row does not expose traffic share.
-        report: Any = {}
-        report_keyword_row: dict[str, Any] = {}
-        if traffic_share in EMPTY:
-            report = self.product_report(asin, site)
-            raw["product_report"] = report
-            report_keyword_row = find_keyword_row(report, keyword)
-            raw["product_report_keyword_match"] = report_keyword_row
-            traffic_share = first_non_empty(
-                traffic_share, find_value(report_keyword_row, TRAFFIC_SHARE_KEYS)
-            )
-            aba_rank = first_non_empty(
-                aba_rank, find_value(report_keyword_row, ABA_RANK_KEYS)
-            )
-            search_volume = first_non_empty(
-                search_volume, find_value(report_keyword_row, SEARCH_VOLUME_KEYS)
-            )
-
-        # ABA/search volume are keyword-level metrics. keyword_detail is a
-        # shared per-keyword fallback and therefore cached across all ASINs.
-        if aba_rank in EMPTY or search_volume in EMPTY:
-            keyword_detail = self.keyword_detail(keyword, site)
-            raw["keyword_detail"] = keyword_detail
-            aba_rank = first_non_empty(aba_rank, find_value(keyword_detail, ABA_RANK_KEYS))
-            search_volume = first_non_empty(
-                search_volume, find_value(keyword_detail, SEARCH_VOLUME_KEYS)
-            )
+        keyword_detail = self.keyword_detail(keyword, site)
+        raw["keyword_detail"] = keyword_detail
+        aba_rank = extract_aba_rank(keyword_detail)
+        search_volume = extract_search_volume(keyword_detail)
 
         detail = self.product_detail(asin, site)
         raw["product_detail"] = detail
         product = parse_product_detail(detail)
-
         price = product.get("price", "")
         coupon_value = product.get("coupon_value", "")
         coupon_type = product.get("coupon_type", "")
@@ -199,77 +173,51 @@ class SorftimeMcpClient:
         rating = product.get("rating", "")
         reviews = product.get("review_count", "")
 
-        # Reuse product_report when it was already requested for traffic fields.
-        # This avoids wasting trend calls if the comprehensive report contains
-        # a metric that product_detail omitted.
-        if report not in EMPTY:
-            report_product = parse_product_detail(report)
-            price = first_non_empty(price, report_product.get("price"))
-            coupon_value = first_non_empty(coupon_value, report_product.get("coupon_value"))
-            coupon_type = first_non_empty(coupon_type, report_product.get("coupon_type"))
-            deal_status = first_non_empty(deal_status, report_product.get("deal_status"))
-            deal_price = first_non_empty(deal_price, report_product.get("deal_price"))
-            prime_price = first_non_empty(
-                prime_price, report_product.get("prime_discount_price")
-            )
-            sales = first_non_empty(sales, report_product.get("estimated_sales"))
-            rank = first_non_empty(rank, report_product.get("product_rank"))
-            rating = first_non_empty(rating, report_product.get("rating"))
-            reviews = first_non_empty(reviews, report_product.get("review_count"))
-
-        # Product trend calls are lazy fallbacks, avoiding 3 calls for every ASIN
-        # when product_detail already returns complete product metrics.
         if price in EMPTY:
-            trend = self.product_trend(asin, "Price", site)
+            trend = self.try_product_trends(asin, site, ("Price",))
             raw["product_trend_price"] = trend
-            price = extract_latest_number(trend)
+            price = extract_latest_metric(trend, PRICE_KEYS)
         if sales in EMPTY:
-            trend = self.product_trend(asin, "SalesVolume", site)
+            trend = self.try_product_trends(asin, site, ("SalesVolume", "Sales", "MonthlySales"))
             raw["product_trend_sales"] = trend
-            sales = extract_latest_number(trend)
+            sales = extract_latest_metric(trend, SALES_KEYS | VALUE_KEYS)
         if rank in EMPTY:
-            trend = self.product_trend(asin, "Rank", site)
+            trend = self.try_product_trends(asin, site, ("Rank", "Ranking", "SalesRank"))
             raw["product_trend_rank"] = trend
-            rank = extract_latest_number(trend)
+            rank = extract_latest_rank(trend)
 
         keyword_rank = first_non_empty(organic_position, ad_position)
-        found_any = any(
-            value not in EMPTY
-            for value in (
-                traffic_share,
-                aba_rank,
-                search_volume,
-                organic_position,
-                ad_position,
-                price,
-                coupon_value,
-                deal_price,
-                prime_price,
-                sales,
-                rank,
-                rating,
-                reviews,
-            )
+        values = (
+            traffic_share, aba_rank, search_volume, organic_position, ad_position,
+            price, coupon_value, deal_price, prime_price, sales, rank, rating, reviews,
         )
+        found_any = any(value not in EMPTY for value in values)
 
-        core_values = {
-            "流量占比": traffic_share,
-            "ABA热度": aba_rank,
-            "搜索量": search_volume,
-            "自然位": organic_position,
-            "价格": price,
-            "月销量": sales,
-            "大类排名": rank,
-            "评分": rating,
-            "评价数": reviews,
+        source_contract = {
+            "流量占比": (traffic_share, "product_traffic_terms"),
+            "ABA热度": (aba_rank, "keyword_detail"),
+            "搜索量": (search_volume, "keyword_detail"),
+            "自然位": (organic_position, "keyword_search_results / product_ranking_trend_by_keyword"),
+            "广告位": (ad_position, "keyword_search_results"),
+            "价格": (price, "product_detail / product_trend"),
+            "月销量": (sales, "product_detail / product_trend"),
+            "大类排名": (rank, "product_detail / product_trend"),
+            "评分": (rating, "product_detail"),
+            "评价数": (reviews, "product_detail"),
         }
-        missing_core = [label for label, value in core_values.items() if value in EMPTY]
-        status = "ok" if found_any and not missing_core else ("partial" if found_any else "not_found")
+        missing = [
+            f"{label}（{source}）"
+            for label, (value, source) in source_contract.items()
+            if value in EMPTY
+        ]
+        status = "ok" if found_any and not missing else ("partial" if found_any else "not_found")
         message = ""
-        if missing_core:
-            message = "Sorftime 未返回：" + "、".join(missing_core)
+        if missing:
+            message = "Sorftime 未返回：" + "、".join(missing)
         if not found_any:
-            message = summarize_errors(raw)
+            diagnostic = summarize_errors(raw)
+            if diagnostic:
+                message = (message + "；" if message else "") + diagnostic
 
         return {
             "keyword_rank": keyword_rank,
@@ -325,7 +273,7 @@ class SorftimeMcpClient:
             next_page += 1
 
         self._traffic_done.add(cache_key)
-        return {}
+        return find_keyword_row(rows, keyword)
 
     def keyword_detail(self, keyword: str, site: str) -> Any:
         key = (keyword.casefold(), site)
@@ -406,6 +354,24 @@ class SorftimeMcpClient:
                 {"asin": asin, "amzSite": site, "productTrendType": trend_type},
             )
         return self._product_trend_cache[key]
+
+    def try_product_trends(
+        self,
+        asin: str,
+        site: str,
+        trend_types: tuple[str, ...],
+    ) -> Any:
+        """Try equivalent trend enum names without aborting the whole row."""
+        errors: list[str] = []
+        for trend_type in trend_types:
+            try:
+                data = self.product_trend(asin, trend_type, site)
+            except Exception as exc:
+                errors.append(f"{trend_type}: {exc}")
+                continue
+            if data not in EMPTY:
+                return data
+        return {"_trend_errors": errors} if errors else {}
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         self._ensure_initialized()
@@ -506,7 +472,7 @@ class SorftimeMcpClient:
                 "params": {
                     "protocolVersion": "2025-03-26",
                     "capabilities": {},
-                    "clientInfo": {"name": "amazon-keyword-tracker", "version": "3.0-local"},
+                    "clientInfo": {"name": "amazon-keyword-tracker", "version": "4.0"},
                 },
             }
         )
@@ -1184,7 +1150,8 @@ def adapt_tool_arguments(tool_name: str, arguments: dict[str, Any], schema: dict
         candidates = aliases.get(source_key, (source_key,))
         target = next((name for name in candidates if name in allowed), None)
         if target:
-            result[target] = value
+            property_schema = properties.get(target) if isinstance(properties, dict) else None
+            result[target] = adapt_schema_value(source_key, value, property_schema)
     required = schema.get("required") or []
     # Keep original keys only when schema is permissive or aliases did not cover them.
     if schema.get("additionalProperties") is not False:
@@ -1197,6 +1164,35 @@ def adapt_tool_arguments(tool_name: str, arguments: dict[str, Any], schema: dict
             f"Sorftime {tool_name} 参数无法匹配 MCP inputSchema，缺少：{'、'.join(map(str, missing))}"
         )
     return result
+
+
+def adapt_schema_value(source_key: str, value: Any, property_schema: Any) -> Any:
+    """Map logical values to the enum spelling exposed by the live MCP schema."""
+    if not isinstance(property_schema, dict):
+        return value
+    enum = property_schema.get("enum")
+    if not isinstance(enum, list) or not enum:
+        return value
+    if value in enum:
+        return value
+    normalized = normalize_field_key(value)
+    for item in enum:
+        if normalize_field_key(item) == normalized:
+            return item
+    if source_key == "productTrendType":
+        aliases = {
+            "rank": {"rank", "ranking", "salesrank", "categoryrank", "bsr"},
+            "ranking": {"rank", "ranking", "salesrank", "categoryrank", "bsr"},
+            "salesrank": {"rank", "ranking", "salesrank", "categoryrank", "bsr"},
+            "salesvolume": {"salesvolume", "sales", "monthlysales", "unitsold"},
+            "monthlysales": {"salesvolume", "sales", "monthlysales", "unitsold"},
+            "price": {"price", "salesprice", "listingprice"},
+        }
+        wanted = aliases.get(normalized, {normalized})
+        for item in enum:
+            if normalize_field_key(item) in wanted:
+                return item
+    return value
 
 
 def validate_sorftime_payload(tool_name: str, payload: Any) -> None:
@@ -1288,6 +1284,79 @@ def find_value(data: Any, keys: set[str]) -> Any:
     return ""
 
 
+def extract_traffic_share(data: Any) -> Any:
+    return find_value(data, TRAFFIC_SHARE_KEYS)
+
+
+def extract_aba_rank(data: Any) -> Any:
+    return find_value(data, ABA_DETAIL_KEYS)
+
+
+def extract_search_volume(data: Any) -> Any:
+    return find_value(data, SEARCH_VOLUME_KEYS)
+
+
+def extract_latest_metric(data: Any, keys: set[str]) -> Any:
+    rows = collect_dict_rows(data)
+    rows.sort(key=lambda row: str(find_value(row, DATE_KEYS) or ""), reverse=True)
+    for row in rows:
+        value = find_value(row, keys)
+        if value not in EMPTY:
+            return scalar_metric(value, keys)
+    value = find_value(data, keys)
+    return scalar_metric(value, keys)
+
+
+def extract_latest_rank(data: Any) -> Any:
+    return scalar_rank(extract_latest_metric(data, RANK_KEYS | VALUE_KEYS))
+
+
+def scalar_metric(value: Any, keys: set[str] | None = None) -> Any:
+    if value in EMPTY:
+        return ""
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        series = parse_series_string(value)
+        return series or value
+    if isinstance(value, dict):
+        nested = find_value(value, (keys or set()) | {"value", "Value", "number", "amount"})
+        if nested is value:
+            return ""
+        return scalar_metric(nested, keys)
+    if isinstance(value, list):
+        for item in value:
+            metric = scalar_metric(item, keys)
+            if metric not in EMPTY:
+                return metric
+    return value
+
+
+def scalar_rank(value: Any) -> Any:
+    if value in EMPTY:
+        return ""
+    if isinstance(value, dict):
+        rows = collect_dict_rows(value)
+        fallback: list[Any] = []
+        for row in rows:
+            label = str(first_non_empty(
+                find_value(row, {"categoryName", "category", "类别", "类目", "rankType", "type"})
+            )).casefold()
+            rank_value = find_value(row, RANK_KEYS | {"value", "position"})
+            if rank_value not in EMPTY:
+                if any(token in label for token in ("root", "main", "大类", "一级")):
+                    return scalar_rank(rank_value)
+                fallback.append(rank_value)
+        if fallback:
+            return scalar_rank(fallback[0])
+    if isinstance(value, list):
+        for item in value:
+            rank = scalar_rank(item)
+            if rank not in EMPTY:
+                return rank
+    return value
+
+
 def parse_product_detail(detail: Any) -> dict[str, Any]:
     direct = {
         "price": find_value(detail, PRICE_KEYS),
@@ -1309,6 +1378,8 @@ def parse_product_detail(detail: Any) -> dict[str, Any]:
     direct["product_rank"] = first_non_empty(direct["product_rank"], regex_value(text, r"(?:大类排名|BSR|SalesRank|productRank)[:：#\s]*([0-9,.]+)"))
     direct["rating"] = first_non_empty(direct["rating"], regex_value(text, r"(?:星级|rating|Rating)[:：]\s*([0-9.]+)"))
     direct["review_count"] = first_non_empty(direct["review_count"], regex_value(text, r"(?:评论数|评价数量|reviewCount|ratingCount)[:：]\s*([0-9,.]+)"))
+    direct["estimated_sales"] = scalar_metric(direct["estimated_sales"], SALES_KEYS)
+    direct["product_rank"] = scalar_rank(direct["product_rank"])
     direct["coupon_type"] = classify_coupon(direct["coupon_value"])
     direct["deal_status"] = normalize_yes_no(direct["deal_status"], bool(direct["deal_price"]))
     return direct
@@ -1376,10 +1447,20 @@ def row_keyword(row: dict[str, Any]) -> str:
 
 def find_keyword_row(data: Any, keyword: str) -> dict[str, Any]:
     target = normalize_keyword(keyword)
-    for row in collect_dict_rows(data):
+    rows = [row for row in collect_dict_rows(data) if row_keyword(row)]
+    for row in rows:
         if normalize_keyword(row_keyword(row)) == target:
             return dict(row)
-    return {}
+    target_tokens = set(re.findall(r"[0-9a-z]+", target))
+    candidates: list[dict[str, Any]] = []
+    if target_tokens:
+        for row in rows:
+            row_tokens = set(re.findall(r"[0-9a-z]+", normalize_keyword(row_keyword(row))))
+            if target_tokens == row_tokens or (
+                len(target_tokens) >= 2 and len(target_tokens & row_tokens) / len(target_tokens) >= 0.8
+            ):
+                candidates.append(row)
+    return dict(candidates[0]) if len(candidates) == 1 else {}
 
 
 def regex_value(text: str, pattern: str) -> str:
@@ -1534,7 +1615,10 @@ def amazon_product_url(asin: str, site: str) -> str:
     return f"https://www.{domains.get(site, 'amazon.com')}/dp/{asin}"
 
 
-KEYWORD_KEYS = {"关键词", "keyword", "Keyword", "searchTerm", "SearchTerm"}
+KEYWORD_KEYS = {
+    "关键词", "keyword", "Keyword", "searchTerm", "SearchTerm", "keywordName",
+    "KeywordName", "searchKeyword", "SearchKeyword", "keywordText", "KeywordText",
+}
 ASIN_KEYS = {"ASIN", "asin", "Asin", "parentAsin", "childAsin"}
 POSITION_KEYS = {
     "排名", "位置", "position", "Position", "rank", "Rank", "searchRank",
@@ -1563,6 +1647,9 @@ TRAFFIC_SHARE_KEYS = {
     "trafficShare", "flowShare", "flow_share", "clickShare", "click_share", "share",
     "TrafficShare", "ClickShare", "FlowShare", "trafficRate", "flowRatio",
     "trafficPercentage", "TrafficPercentage", "trafficPercent", "searchTrafficShare",
+    "trafficRatio", "TrafficRatio", "trafficRate", "TrafficRate", "flowRate",
+    "keywordTrafficShare", "KeywordTrafficShare", "searchTermTrafficShare",
+    "trafficContribution", "TrafficContribution", "流量贡献率", "关键词流量份额",
 }
 ABA_RANK_KEYS = {
     "ABA热度排名", "ABA排名", "ABA", "ABA Rank", "aba_rank", "abaRank",
@@ -1570,6 +1657,10 @@ ABA_RANK_KEYS = {
     "关键词热度排名", "搜索频率排名", "Search Frequency Rank", "SFR",
     "weeklySearchFrequencyRank", "abaWeeklyRank", "ABA周排名",
     "SearchFrequencyRanking", "searchFrequencyRanking", "ABARanking", "abaHeatRank",
+}
+ABA_DETAIL_KEYS = ABA_RANK_KEYS | {
+    "rank", "Rank", "ranking", "Ranking", "hotRank", "heatRank",
+    "searchRank", "keywordRank", "frequencyRank", "weeklyRank",
 }
 SEARCH_VOLUME_KEYS = {
     "搜索量", "月搜索量", "周搜索量", "关键词搜索量", "search_volume", "searchVolume",
@@ -1606,12 +1697,17 @@ SALES_KEYS = {
     "monthly_sales", "salesVolume", "ListingSalesVolumeOfMonth", "MonthSaleVolume",
     "SalesVolume", "estimatedSales", "estimateSales",
     "SalesVolumeOfMonth", "salesVolumeOfMonth", "ListingSalesVolume", "monthlySaleVolume",
+    "MonthSalesVolume", "monthSalesVolume", "CurrentSalesVolume", "currentSalesVolume",
+    "ASINMonthSalesVolume", "asinMonthSalesVolume", "monthlyUnitsSold", "unitsSoldLastMonth",
+    "EstimatedMonthlySales", "estimatedMonthlySales", "salesVolume30Days", "SalesVolume30Days",
 }
 RANK_KEYS = {
     "产品排名", "大类排名", "rank", "bsr", "BSR", "productRank", "categoryRank",
     "subcategorySalesVolumeRank", "bestSellerRank", "CategoryRank", "SalesRank",
     "BestSellerRank", "parentCategoryRank",
     "bigCategoryRank", "BigCategoryRank", "rankingOfCategory", "categoryBsrRank",
+    "MainCategoryRank", "mainCategoryRank", "RootCategoryRank", "rootCategoryRank",
+    "SalesRankOfCategory", "salesRankOfCategory", "AmazonBestSellerRank", "amazonBestSellerRank",
 }
 RATING_KEYS = {
     "星级", "评分", "rating", "ratings", "reviewRating", "linkRating", "Rating",

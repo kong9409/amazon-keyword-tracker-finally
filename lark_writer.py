@@ -6,6 +6,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import date, datetime, timezone
 from typing import Any
 
 FEISHU_API = "https://open.feishu.cn/open-apis"
@@ -67,9 +68,12 @@ def append_records_to_lark(
             raise RuntimeError("该 Base 中没有可写入的数据表，请先在飞书 Base 中新建一张表。")
 
         created_fields: list[str] = []
+        field_definitions: dict[str, dict[str, Any]] = {}
         field_permission_warning = ""
         try:
-            created_fields = ensure_fields(app_token, table_id, auth, field_columns)
+            created_fields, field_definitions = ensure_fields(
+                app_token, table_id, auth, field_columns
+            )
         except Exception as field_exc:
             # Some Base roles allow adding records but do not allow reading or
             # creating fields.  In that case, try writing against existing field
@@ -88,10 +92,12 @@ def append_records_to_lark(
                 payload = {
                     "records": [
                         {
-                            "fields": {
-                                label: normalize_cell(record.get(key, ""))
-                                for key, label in field_columns
-                            }
+                            "fields": build_record_fields(
+                                record,
+                                field_columns,
+                                field_definitions,
+                                force_text=not bool(field_definitions),
+                            )
                         }
                         for record in batch
                     ]
@@ -188,7 +194,11 @@ def first_table_id(app_token: str, headers: dict[str, str]) -> str:
     return ""
 
 
-def list_field_names(app_token: str, table_id: str, headers: dict[str, str]) -> set[str]:
+def list_field_definitions(
+    app_token: str,
+    table_id: str,
+    headers: dict[str, str],
+) -> dict[str, dict[str, Any]]:
     response = request_json(
         f"{FEISHU_API}/bitable/v1/apps/{quote(app_token)}/tables/{quote(table_id)}/fields?page_size=100",
         method="GET",
@@ -196,11 +206,12 @@ def list_field_names(app_token: str, table_id: str, headers: dict[str, str]) -> 
     )
     assert_feishu_ok(response, "读取飞书字段失败")
     items = (response.get("data") or {}).get("items") or []
-    return {
-        str(item.get("field_name"))
-        for item in items
-        if isinstance(item, dict) and item.get("field_name")
-    }
+    result: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict) or not item.get("field_name"):
+            continue
+        result[str(item["field_name"])] = dict(item)
+    return result
 
 
 def ensure_fields(
@@ -208,21 +219,143 @@ def ensure_fields(
     table_id: str,
     headers: dict[str, str],
     field_columns: list[tuple[str, str]],
-) -> list[str]:
-    existing = list_field_names(app_token, table_id, headers)
+) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    fields = list_field_definitions(app_token, table_id, headers)
     created: list[str] = []
     for _, label in field_columns:
-        if label in existing:
+        if label in fields:
             continue
         response = request_json(
             f"{FEISHU_API}/bitable/v1/apps/{quote(app_token)}/tables/{quote(table_id)}/fields",
-            {"field_name": label, "type": 1},  # 1 = 文本
+            {"field_name": label, "type": 1},  # 1 = 多行文本
             headers=headers,
         )
         assert_feishu_ok(response, f"创建飞书字段“{label}”失败")
-        existing.add(label)
+        field = ((response.get("data") or {}).get("field") or {})
+        fields[label] = dict(field) if isinstance(field, dict) else {}
+        fields[label].setdefault("field_name", label)
+        fields[label].setdefault("type", 1)
         created.append(label)
-    return created
+    return created, fields
+
+
+_SKIP_CELL = object()
+
+
+def build_record_fields(
+    record: dict[str, Any],
+    field_columns: list[tuple[str, str]],
+    field_definitions: dict[str, dict[str, Any]],
+    force_text: bool = False,
+) -> dict[str, Any]:
+    """Build a Feishu fields payload using the table's actual field types.
+
+    Empty values are omitted.  This matters for number/date/select fields because
+    sending an empty string causes Feishu conversion errors.  When field metadata
+    cannot be read, all non-empty values are safely serialized as text.
+    """
+    fields: dict[str, Any] = {}
+    for key, label in field_columns:
+        value = record.get(key, "")
+        definition = field_definitions.get(label) or {"field_name": label, "type": 1}
+        converted = normalize_cell_for_field(value, definition, force_text=force_text)
+        if converted is _SKIP_CELL:
+            continue
+        fields[label] = converted
+    return fields
+
+
+def normalize_cell_for_field(
+    value: Any,
+    field: dict[str, Any] | None,
+    force_text: bool = False,
+) -> Any:
+    if value is None or value == "" or value == [] or value == {}:
+        return _SKIP_CELL
+    field_type = 1
+    if not force_text and isinstance(field, dict):
+        try:
+            field_type = int(field.get("type") or 1)
+        except (TypeError, ValueError):
+            field_type = 1
+
+    if force_text or field_type == 1:  # 多行文本
+        return stringify_cell(value)
+    if field_type == 2:  # 数字
+        number = numeric_cell(value)
+        return number if number is not None else _SKIP_CELL
+    if field_type == 3:  # 单选
+        return stringify_cell(value)
+    if field_type == 4:  # 多选
+        if isinstance(value, (list, tuple, set)):
+            return [stringify_cell(item) for item in value if item not in (None, "")]
+        return [stringify_cell(value)]
+    if field_type == 5:  # 日期
+        timestamp = datetime_cell(value)
+        return timestamp if timestamp is not None else _SKIP_CELL
+    if field_type == 7:  # 复选框
+        return boolean_cell(value)
+    if field_type == 15:  # 超链接
+        text = stringify_cell(value)
+        return {"text": text, "link": text}
+
+    # Tracker-created fields are text fields.  For an unexpected existing field
+    # type, string serialization is safer than passing raw dict/list/number data.
+    return stringify_cell(value)
+
+
+def stringify_cell(value: Any) -> str:
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, (dict, list, tuple, set)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    return str(value)
+
+
+def numeric_cell(value: Any) -> int | float | None:
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value).strip().replace(",", "")
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+    number = float(match.group())
+    return int(number) if number.is_integer() else number
+
+
+def datetime_cell(value: Any) -> int | None:
+    if isinstance(value, (int, float)):
+        number = int(value)
+        return number if number > 10_000_000_000 else number * 1000
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, date):
+        dt = datetime(value.year, value.month, value.day)
+    else:
+        text = str(value).strip().replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    dt = datetime.strptime(text, fmt)
+                    break
+                except ValueError:
+                    continue
+            else:
+                return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
+def boolean_cell(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().casefold()
+    return text in {"1", "true", "yes", "y", "是", "有", "启用", "active"}
 
 
 def assert_feishu_ok(response: dict[str, Any], action: str) -> None:
@@ -293,6 +426,19 @@ def explain_feishu_error(exc: Exception) -> str:
             "建议粘贴 /base/ 开头的直接 Base 链接，不要使用仅个人可见的 /wiki/ 快捷链接。"
             f" 原始错误：{text}"
         )
+    if "textfieldconvfail" in lower or "1254060" in lower:
+        return (
+            "飞书写入失败：目标表中存在文本字段，但提交值不是文本。"
+            "V4 已按字段类型转换：文本字段统一转字符串，空白数字/日期字段不再提交。"
+            "请部署 V4 后重试；若仍失败，请检查目标表是否有同名公式、查找引用或人员字段。"
+            f" 原始错误：{text}"
+        )
+    if "numberfieldconvfail" in lower or "1254061" in lower:
+        return (
+            "飞书写入失败：目标表中的数字字段包含无法转换为数字的内容。"
+            "请把对应列改为文本，或清除百分号、货币符号以外的说明文字。"
+            f" 原始错误：{text}"
+        )
     if "http 401" in lower or "unauthorized" in lower:
         return "飞书鉴权失败：请检查 App ID、App Secret 是否属于同一个已启用的自建应用。原始错误：" + text
     if "wrongbasetoken" in lower or "basetokennotfound" in lower or "1254003" in lower or "1254040" in lower:
@@ -305,8 +451,7 @@ def quote(value: str) -> str:
 
 
 def normalize_cell(value: Any) -> Any:
+    """Backward-compatible text normalization used by older imports/tests."""
     if value is None:
         return ""
-    if isinstance(value, (str, int, float, bool)):
-        return value
-    return json.dumps(value, ensure_ascii=False)
+    return stringify_cell(value)
