@@ -8,6 +8,11 @@
 
 ## 本版修复
 
+- 修复实时 MCP schema 使用 `amz_site` / `keyword_support_site` 时站点参数被丢弃、导致全部字段空白的问题。
+- Sorftime 普通文本参数错误会直接显示，不再误报为“未返回匹配数据”。
+- MCP 临时 SSL EOF、429、500、502、503、504 增加最多 3 次自动重试。
+- 飞书字段接口 403 时，自动跳过字段创建并尝试写入已有同名字段。
+
 - 修复 MCP `product_detail` 被错误路由到 `tiktok_product_detail` 的问题。
 - MCP 工具匹配会优先选择精确 Amazon 工具，并排除 TikTok、Temu、Shopee、Walmart 等平台前缀。
 - 修复 CLI/MCP 切换后隐藏字段仍显示、输入框高度和边框不一致的问题。
@@ -70,7 +75,7 @@ Base 链接（建议复制到具体数据表，链接中包含 table=tbl...）
 1. 获取 tenant_access_token。
 2. 如果粘贴的是 Wiki 链接，解析为 Base app_token。
 3. 如果链接不含 table_id，选择 Base 中第一张表。
-4. 检查字段并创建缺失字段。
+4. 检查字段并创建缺失字段。若字段接口返回 403，会自动跳过字段管理并尝试写入已有同名字段。
 5. 每批最多 500 条写入。
 
 App Secret 不会写入任务 JSON。
@@ -116,4 +121,4 @@ python -m py_compile app.py sorftime_adapter.py lark_writer.py
 
 - 飞书 403：App ID/Secret 并不等于文档权限。请开通 `bitable:app`、发布审批，并把应用加入目标 Base 协作者；高级权限 Base 还要给应用所在角色读写权限。
 - MCP 全字段空白：新版已支持 MCP `structuredContent`、代码块 JSON、实时 inputSchema 参数适配和字段别名解析。若账户次数不足或套餐无接口权限，会直接显示实际错误。
-- 详细说明见 `FIX_NOTES.md` 与 `FEISHU_PERMISSION_CHECKLIST.md`。
+- 详细说明见 `V3_FIX_NOTES.md`、`FIX_NOTES.md` 与 `FEISHU_PERMISSION_CHECKLIST.md`。

@@ -517,36 +517,47 @@ class SorftimeMcpClient:
         self._initialized = True
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "MCP-Protocol-Version": "2025-03-26",
-        }
-        if self._session_id:
-            headers["Mcp-Session-Id"] = self._session_id
-        if self.token:
-            headers["Authorization"] = self.token if self.token.lower().startswith("bearer ") else f"Bearer {self.token}"
-        request = urllib.request.Request(
-            self.url,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                session_id = response.headers.get("Mcp-Session-Id", "")
-                if session_id:
-                    self._session_id = session_id
-                body = response.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            message = extract_http_error(body) or exc.reason
-            raise RuntimeError(f"Sorftime MCP HTTP {exc.code}：{message}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"无法连接 Sorftime MCP：{exc.reason}") from exc
-        if not body.strip():
-            return {}
-        return parse_mcp_response(body)
+        retryable_http = {429, 500, 502, 503, 504}
+        last_error: Exception | None = None
+        for attempt in range(3):
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "MCP-Protocol-Version": "2025-03-26",
+            }
+            if self._session_id:
+                headers["Mcp-Session-Id"] = self._session_id
+            if self.token:
+                headers["Authorization"] = self.token if self.token.lower().startswith("bearer ") else f"Bearer {self.token}"
+            request = urllib.request.Request(
+                self.url,
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=120) as response:
+                    session_id = response.headers.get("Mcp-Session-Id", "")
+                    if session_id:
+                        self._session_id = session_id
+                    body = response.read().decode("utf-8", errors="replace")
+                if not body.strip():
+                    return {}
+                return parse_mcp_response(body)
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                message = extract_http_error(body) or exc.reason
+                last_error = RuntimeError(f"Sorftime MCP HTTP {exc.code}：{message}")
+                if exc.code not in retryable_http or attempt >= 2:
+                    raise last_error from exc
+            except urllib.error.URLError as exc:
+                last_error = RuntimeError(f"无法连接 Sorftime MCP：{exc.reason}")
+                if attempt >= 2:
+                    raise last_error from exc
+            time.sleep(0.8 * (attempt + 1))
+        if last_error:
+            raise last_error
+        return {}
 
 
 class SorftimeCliClient:
@@ -1136,15 +1147,38 @@ def adapt_tool_arguments(tool_name: str, arguments: dict[str, Any], schema: dict
         return dict(arguments)
     allowed = set(properties)
     result: dict[str, Any] = {}
+    # Sorftime's public matrix documents camelCase parameter names, while the
+    # live MCP inputSchema currently exposes several of them in snake_case
+    # (for example ``amz_site`` and ``keyword_support_site``).  Keep both forms
+    # in the same alias group so the site is never silently dropped.
     aliases = {
-        "asin": ("asin", "ASIN", "productAsin"),
-        "keyword": ("keyword", "searchTerm", "keywordName"),
-        "amzSite": ("amzSite", "keywordSupportSite", "marketplace", "site", "amazonSite"),
-        "keywordSupportSite": ("keywordSupportSite", "amzSite", "marketplace", "site", "amazonSite"),
-        "marketplace": ("marketplace", "amzSite", "keywordSupportSite", "site", "amazonSite"),
-        "page": ("page", "pageIndex", "pageNum"),
+        "asin": ("asin", "ASIN", "productAsin", "product_asin"),
+        "keyword": ("keyword", "searchTerm", "search_term", "keywordName", "keyword_name"),
+        "amzSite": (
+            "amzSite", "amz_site", "keywordSupportSite", "keyword_support_site",
+            "marketplace", "site", "amazonSite", "amazon_site",
+        ),
+        "amz_site": (
+            "amz_site", "amzSite", "keyword_support_site", "keywordSupportSite",
+            "marketplace", "site", "amazon_site", "amazonSite",
+        ),
+        "keywordSupportSite": (
+            "keywordSupportSite", "keyword_support_site", "amzSite", "amz_site",
+            "marketplace", "site", "amazonSite", "amazon_site",
+        ),
+        "keyword_support_site": (
+            "keyword_support_site", "keywordSupportSite", "amz_site", "amzSite",
+            "marketplace", "site", "amazon_site", "amazonSite",
+        ),
+        "marketplace": (
+            "marketplace", "amz_site", "amzSite", "keyword_support_site",
+            "keywordSupportSite", "site", "amazon_site", "amazonSite",
+        ),
+        "page": ("page", "pageIndex", "page_index", "pageNum", "page_num"),
         "positionType": ("positionType", "position_type", "type"),
-        "productTrendType": ("productTrendType", "trendType", "trend_type"),
+        "productTrendType": (
+            "productTrendType", "product_trend_type", "trendType", "trend_type",
+        ),
     }
     for source_key, value in arguments.items():
         candidates = aliases.get(source_key, (source_key,))
@@ -1167,6 +1201,14 @@ def adapt_tool_arguments(tool_name: str, arguments: dict[str, Any], schema: dict
 
 def validate_sorftime_payload(tool_name: str, payload: Any) -> None:
     """Raise clear errors for Sorftime business-level failures hidden in tool data."""
+    # Sorftime sometimes returns validation failures as plain TextContent rather
+    # than a JSON error envelope.  Treat those strings as real errors instead of
+    # letting the tracker mislabel them as "未返回匹配数据".
+    if isinstance(payload, str):
+        text = payload.strip()
+        if text and is_error_text(text):
+            raise RuntimeError(f"Sorftime {tool_name} 返回错误：{text}")
+        return
     if not isinstance(payload, dict):
         return
     code = payload.get("Code", payload.get("code"))
@@ -1426,7 +1468,9 @@ def is_error_text(value: Any) -> bool:
     text = value.lower()
     return any(mark in text for mark in (
         "not found", "no data", "no result", "failed", "error", "unauthorized",
-        "authentication required", "未查询到", "请求数量不足", "requestleft",
+        "authentication required", "please specify", "required parameter",
+        "missing parameter", "invalid parameter", "method signature",
+        "未查询到", "请求数量不足", "缺少参数", "参数错误", "requestleft",
     ))
 
 

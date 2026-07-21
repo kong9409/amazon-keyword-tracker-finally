@@ -16,7 +16,8 @@ import app
 import lark_writer
 from sorftime_adapter import (
     SorftimeCliClient, SorftimeMcpClient, adapt_tool_arguments, build_tool_name_map,
-    find_value, parse_tool_result, PRICE_KEYS, SALES_KEYS, RATING_KEYS, REVIEW_KEYS,
+    find_value, parse_tool_result, validate_sorftime_payload,
+    PRICE_KEYS, SALES_KEYS, RATING_KEYS, REVIEW_KEYS,
 )
 
 
@@ -92,6 +93,54 @@ class TrackerTests(unittest.TestCase):
         )
         self.assertEqual(args, {"keyword": "shower door", "amzSite": "US", "pageIndex": 2, "position_type": 0})
 
+    def test_mcp_arguments_support_live_snake_case_site_names(self) -> None:
+        product_schema = {
+            "type": "object",
+            "properties": {"asin": {}, "amz_site": {}},
+            "required": ["asin"],
+            "additionalProperties": False,
+        }
+        product_args = adapt_tool_arguments(
+            "product_detail",
+            {"asin": "B0DT499THF", "amzSite": "US"},
+            product_schema,
+        )
+        self.assertEqual(product_args, {"asin": "B0DT499THF", "amz_site": "US"})
+
+        keyword_schema = {
+            "type": "object",
+            "properties": {"keyword": {}, "keyword_support_site": {}},
+            "required": ["keyword"],
+            "additionalProperties": False,
+        }
+        keyword_args = adapt_tool_arguments(
+            "keyword_detail",
+            {"keyword": "shower door", "keywordSupportSite": "US"},
+            keyword_schema,
+        )
+        self.assertEqual(
+            keyword_args,
+            {"keyword": "shower door", "keyword_support_site": "US"},
+        )
+
+        rank_args = adapt_tool_arguments(
+            "product_ranking_trend_by_keyword",
+            {"asin": "B0DT499THF", "keyword": "shower door", "marketplace": "US"},
+            {
+                "type": "object",
+                "properties": {"asin": {}, "keyword": {}, "amz_site": {}},
+                "additionalProperties": False,
+            },
+        )
+        self.assertEqual(rank_args["amz_site"], "US")
+
+    def test_plain_text_parameter_error_is_not_treated_as_empty_data(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "Please specify the site"):
+            validate_sorftime_payload(
+                "product_detail",
+                "Please specify the site to query. See the amz_site parameter description in the method signature.",
+            )
+
     def test_feishu_403_has_actionable_permission_message(self) -> None:
         message = lark_writer.explain_feishu_error(
             RuntimeError("飞书接口 HTTP 403（/open-apis/bitable/v1/apps/x/tables/y/records/batch_create）：Forbidden")
@@ -119,6 +168,36 @@ class TrackerTests(unittest.TestCase):
         self.assertNotIn("tiktok", mapping["product_detail"].lower())
         self.assertNotIn("temu", mapping["product_detail"].lower())
 
+
+    def test_feishu_fields_403_falls_back_to_direct_record_write(self) -> None:
+        calls: list[str] = []
+
+        def fake_request(url, payload=None, headers=None, method="POST"):
+            calls.append(url)
+            if url.endswith("/auth/v3/tenant_access_token/internal"):
+                return {"code": 0, "tenant_access_token": "tenant-token"}
+            if "/fields?page_size=100" in url:
+                raise RuntimeError(
+                    "飞书接口 HTTP 403（/open-apis/bitable/v1/apps/x/tables/y/fields）：Forbidden"
+                )
+            if url.endswith("/records/batch_create"):
+                return {"code": 0, "data": {"records": payload["records"]}}
+            raise AssertionError(url)
+
+        with patch("lark_writer.request_json", side_effect=fake_request):
+            result = lark_writer.append_records_to_lark(
+                [{"date": "2026-07-21", "asin": "B0DT499THF"}],
+                {
+                    "feishu_app_id": "cli_demo",
+                    "feishu_app_secret": "secret",
+                    "base_url": "https://example.feishu.cn/base/bascnDemo?table=tblDemo",
+                },
+                [("date", "日期"), ("asin", "ASIN")],
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["written"], 1)
+        self.assertIn("跳过自动建字段", result["message"])
+        self.assertTrue(any(url.endswith("/records/batch_create") for url in calls))
 
     def test_feishu_base_link_and_missing_field_creation(self) -> None:
         calls: list[tuple[str, str, dict | None]] = []

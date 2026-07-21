@@ -66,32 +66,56 @@ def append_records_to_lark(
         if not table_id:
             raise RuntimeError("该 Base 中没有可写入的数据表，请先在飞书 Base 中新建一张表。")
 
-        created_fields = ensure_fields(app_token, table_id, auth, field_columns)
+        created_fields: list[str] = []
+        field_permission_warning = ""
+        try:
+            created_fields = ensure_fields(app_token, table_id, auth, field_columns)
+        except Exception as field_exc:
+            # Some Base roles allow adding records but do not allow reading or
+            # creating fields.  In that case, try writing against existing field
+            # names instead of failing before the first record is attempted.
+            if is_feishu_permission_error(field_exc):
+                field_permission_warning = (
+                    "应用无字段读取/创建权限，已跳过自动建字段并尝试按现有字段名直接写入"
+                )
+            else:
+                raise
+
         written = 0
-        for start in range(0, len(records), 500):
-            batch = records[start : start + 500]
-            payload = {
-                "records": [
-                    {
-                        "fields": {
-                            label: normalize_cell(record.get(key, ""))
-                            for key, label in field_columns
+        try:
+            for start in range(0, len(records), 500):
+                batch = records[start : start + 500]
+                payload = {
+                    "records": [
+                        {
+                            "fields": {
+                                label: normalize_cell(record.get(key, ""))
+                                for key, label in field_columns
+                            }
                         }
-                    }
-                    for record in batch
-                ]
-            }
-            url = (
-                f"{FEISHU_API}/bitable/v1/apps/{quote(app_token)}"
-                f"/tables/{quote(table_id)}/records/batch_create"
-            )
-            response = request_json(url, payload, headers=auth)
-            assert_feishu_ok(response, "批量写入飞书记录失败")
-            written += len(batch)
+                        for record in batch
+                    ]
+                }
+                url = (
+                    f"{FEISHU_API}/bitable/v1/apps/{quote(app_token)}"
+                    f"/tables/{quote(table_id)}/records/batch_create"
+                )
+                response = request_json(url, payload, headers=auth)
+                assert_feishu_ok(response, "批量写入飞书记录失败")
+                written += len(batch)
+        except Exception as write_exc:
+            if field_permission_warning:
+                raise RuntimeError(
+                    "读取飞书字段返回 403，程序已自动跳过字段检查并尝试直接写入，"
+                    f"但写入仍失败：{write_exc}"
+                ) from write_exc
+            raise
 
         detail = f"已写入飞书 {written} 条"
         if created_fields:
             detail += f"，并自动创建 {len(created_fields)} 个缺失字段"
+        if field_permission_warning:
+            detail += f"；{field_permission_warning}"
         return {
             "ok": True,
             "message": detail + "。",
@@ -99,6 +123,7 @@ def append_records_to_lark(
             "app_token": app_token,
             "table_id": table_id,
             "created_fields": created_fields,
+            "field_permission_warning": field_permission_warning,
         }
     except Exception as exc:
         return {"ok": False, "message": explain_feishu_error(exc), "written": 0}
@@ -235,6 +260,16 @@ def request_json(
     except urllib.error.URLError as exc:
         raise RuntimeError(f"无法连接飞书开放平台：{exc.reason}") from exc
 
+
+
+def is_feishu_permission_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "http 403" in text
+        or "forbidden" in text
+        or "1254302" in text
+        or "1254304" in text
+    )
 
 def explain_feishu_error(exc: Exception) -> str:
     text = str(exc)

@@ -79,3 +79,7 @@ Zeabur 端口/健康检查：通过，监听 0.0.0.0:$PORT
 ```
 
 无法在交付环境中使用你的真实 Sorftime Token 和飞书 Secret 做线上写入测试；MCP 平台路由、CLI 固定命令、飞书 API 调用顺序均通过模拟测试。
+
+## V3 实际运行结果修复（2026-07-21）
+
+根据用户上传的实际导出文件确认，所有 Amazon MCP 工具返回 `Please specify the site to query`。根因是实时 inputSchema 使用 `amz_site` / `keyword_support_site`，而 V2 只适配 camelCase。V3 已补齐 snake_case 参数别名、普通文本错误识别、MCP 临时网络重试，并增加飞书字段 403 的直接写入降级。
