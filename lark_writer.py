@@ -101,7 +101,7 @@ def append_records_to_lark(
             "created_fields": created_fields,
         }
     except Exception as exc:
-        return {"ok": False, "message": str(exc), "written": 0}
+        return {"ok": False, "message": explain_feishu_error(exc), "written": 0}
 
 
 def parse_bitable_url(url: str) -> dict[str, str]:
@@ -228,9 +228,41 @@ def request_json(
             message = detail.get("msg") or detail.get("message") or body
         except json.JSONDecodeError:
             message = body or str(exc)
-        raise RuntimeError(f"飞书接口 HTTP {exc.code}：{message}") from exc
+        request_id = exc.headers.get("X-Tt-Logid", "") or exc.headers.get("X-Request-Id", "")
+        path = urllib.parse.urlparse(url).path
+        suffix = f"；request_id={request_id}" if request_id else ""
+        raise RuntimeError(f"飞书接口 HTTP {exc.code}（{path}）：{message}{suffix}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"无法连接飞书开放平台：{exc.reason}") from exc
+
+
+def explain_feishu_error(exc: Exception) -> str:
+    text = str(exc)
+    lower = text.lower()
+    if "http 403" in lower or "1254302" in lower or "1254304" in lower or "forbidden" in lower:
+        stage = "访问飞书 Base"
+        if "/wiki/" in lower:
+            stage = "解析 Wiki/Base 链接"
+        elif "/fields" in lower:
+            stage = "读取或创建飞书字段"
+        elif "/records/batch_create" in lower:
+            stage = "写入飞书记录"
+        elif "/tables" in lower:
+            stage = "读取飞书数据表"
+        return (
+            f"{stage}失败：飞书返回 403，无文档或角色权限。"
+            "请完成三项设置：① 飞书开放平台给应用开通多维表格读写权限 bitable:app，"
+            "发布版本并完成管理员审批；② 在目标 Base 右上角的协作者/添加应用中，"
+            "把该 App ID 对应的应用加入并授予可编辑权限；③ 如果 Base 开启高级权限，"
+            "把应用加入具有该数据表、字段和记录读写权限的角色或群。"
+            "建议粘贴 /base/ 开头的直接 Base 链接，不要使用仅个人可见的 /wiki/ 快捷链接。"
+            f" 原始错误：{text}"
+        )
+    if "http 401" in lower or "unauthorized" in lower:
+        return "飞书鉴权失败：请检查 App ID、App Secret 是否属于同一个已启用的自建应用。原始错误：" + text
+    if "wrongbasetoken" in lower or "basetokennotfound" in lower or "1254003" in lower or "1254040" in lower:
+        return "飞书 Base 链接无法识别或已失效：请复制浏览器地址栏中的完整 /base/... 链接，并确认链接内 table 参数对应目标数据表。原始错误：" + text
+    return text
 
 
 def quote(value: str) -> str:

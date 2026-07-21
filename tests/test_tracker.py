@@ -14,7 +14,10 @@ from openpyxl import load_workbook
 
 import app
 import lark_writer
-from sorftime_adapter import SorftimeCliClient, SorftimeMcpClient, build_tool_name_map
+from sorftime_adapter import (
+    SorftimeCliClient, SorftimeMcpClient, adapt_tool_arguments, build_tool_name_map,
+    find_value, parse_tool_result, PRICE_KEYS, SALES_KEYS, RATING_KEYS, REVIEW_KEYS,
+)
 
 
 class FakeSorftimeClient(SorftimeMcpClient):
@@ -62,6 +65,40 @@ class FakeSorftimeClient(SorftimeMcpClient):
 
 
 class TrackerTests(unittest.TestCase):
+
+
+    def test_mcp_structured_content_and_fenced_json_are_parsed(self) -> None:
+        structured = {"structuredContent": {"Code": 0, "Data": {"ListingPriceAmount": 39.99, "SalesVolumeOfMonth": 888}}}
+        parsed = parse_tool_result(structured)
+        self.assertEqual(find_value(parsed, PRICE_KEYS), 39.99)
+        self.assertEqual(find_value(parsed, SALES_KEYS), 888)
+
+        fenced = {"content": [{"type": "text", "text": "```json\n{\"Code\":0,\"Data\":{\"ReviewScore\":4.7,\"ReviewAmount\":1234}}\n```"}]}
+        parsed2 = parse_tool_result(fenced)
+        self.assertEqual(find_value(parsed2, RATING_KEYS), 4.7)
+        self.assertEqual(find_value(parsed2, REVIEW_KEYS), 1234)
+
+    def test_mcp_arguments_follow_live_input_schema(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {"keyword": {}, "amzSite": {}, "pageIndex": {}, "position_type": {}},
+            "required": ["keyword", "amzSite"],
+            "additionalProperties": False,
+        }
+        args = adapt_tool_arguments(
+            "keyword_search_results",
+            {"keyword": "shower door", "keywordSupportSite": "US", "page": 2, "positionType": 0},
+            schema,
+        )
+        self.assertEqual(args, {"keyword": "shower door", "amzSite": "US", "pageIndex": 2, "position_type": 0})
+
+    def test_feishu_403_has_actionable_permission_message(self) -> None:
+        message = lark_writer.explain_feishu_error(
+            RuntimeError("飞书接口 HTTP 403（/open-apis/bitable/v1/apps/x/tables/y/records/batch_create）：Forbidden")
+        )
+        self.assertIn("bitable:app", message)
+        self.assertIn("协作者", message)
+        self.assertIn("高级权限", message)
 
     def test_mcp_tool_mapping_never_routes_amazon_to_tiktok(self) -> None:
         names = [

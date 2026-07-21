@@ -111,3 +111,9 @@ python -m unittest discover -s tests -v
 node --check static/app.js
 python -m py_compile app.py sorftime_adapter.py lark_writer.py
 ```
+
+## 飞书 403 与 MCP 空白排查
+
+- 飞书 403：App ID/Secret 并不等于文档权限。请开通 `bitable:app`、发布审批，并把应用加入目标 Base 协作者；高级权限 Base 还要给应用所在角色读写权限。
+- MCP 全字段空白：新版已支持 MCP `structuredContent`、代码块 JSON、实时 inputSchema 参数适配和字段别名解析。若账户次数不足或套餐无接口权限，会直接显示实际错误。
+- 详细说明见 `FIX_NOTES.md` 与 `FEISHU_PERMISSION_CHECKLIST.md`。

@@ -119,8 +119,8 @@
       const info = payload.connection || {};
       const source = info.source === "sorftime_cli" ? "CLI" : "MCP";
       const count = Array.isArray(info.recognized_tools) ? info.recognized_tools.length : Number(info.tool_count || 0);
-      setConnectionState("connected", `连接成功：${source}，可用接口 ${count} 个，用时 ${Number(info.elapsed_seconds || 0).toFixed(2)} 秒`);
-      toast("Sorftime 连接成功");
+      setConnectionState("connected", `工具连接成功：${source}，识别接口 ${count} 个；数据权限将在抓取时验证，用时 ${Number(info.elapsed_seconds || 0).toFixed(2)} 秒`);
+      toast("Sorftime 工具连接成功，数据权限将在抓取时验证");
     } catch (error) {
       setConnectionState("disconnected", error.message);
       toast(error.message, true);

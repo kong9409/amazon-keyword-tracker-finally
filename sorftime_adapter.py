@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import unicodedata
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -69,6 +70,7 @@ class SorftimeMcpClient:
         self.token = token.strip()
         self._session_id = ""
         self._tool_name_map: dict[str, str] = {}
+        self._tool_schemas: dict[str, dict[str, Any]] = {}
         self._initialized = False
         self._lock = threading.Lock()
         self.started_at = time.perf_counter()
@@ -296,10 +298,10 @@ class SorftimeMcpClient:
 
     def find_traffic_term(self, asin: str, keyword: str, site: str) -> dict[str, Any]:
         cache_key = (asin, site)
-        target = keyword.casefold()
+        target = normalize_keyword(keyword)
         rows = self._traffic_rows.setdefault(cache_key, [])
         for row in rows:
-            if row_keyword(row).casefold() == target:
+            if normalize_keyword(row_keyword(row)) == target:
                 return dict(row)
 
         next_page = self._traffic_next_page.get(cache_key, 1)
@@ -315,7 +317,7 @@ class SorftimeMcpClient:
             rows.extend(page_rows)
             self._traffic_next_page[cache_key] = next_page + 1
             for row in page_rows:
-                if row_keyword(row).casefold() == target:
+                if normalize_keyword(row_keyword(row)) == target:
                     return dict(row)
             if not page_rows or len(page_rows) < 20:
                 self._traffic_done.add(cache_key)
@@ -410,13 +412,15 @@ class SorftimeMcpClient:
         if self._tool_name_map and name not in self._tool_name_map:
             raise RuntimeError(f"Sorftime MCP 未提供 Amazon 工具：{name}")
         actual_name = self._tool_name_map.get(name, name)
+        schema = self._tool_schemas.get(name) or {}
+        call_arguments = adapt_tool_arguments(name, arguments, schema)
         started = time.perf_counter()
         response = self._post(
             {
                 "jsonrpc": "2.0",
                 "id": int(time.time() * 1000),
                 "method": "tools/call",
-                "params": {"name": actual_name, "arguments": arguments},
+                "params": {"name": actual_name, "arguments": call_arguments},
             }
         )
         elapsed = time.perf_counter() - started
@@ -431,10 +435,11 @@ class SorftimeMcpClient:
             raise RuntimeError((error.get("message") or f"Sorftime tool failed: {name}") + suffix)
         result = response.get("result", {})
         if result.get("isError"):
-            text = parse_tool_content(result.get("content", []))
+            text = parse_tool_result(result)
             raise RuntimeError(f"Sorftime {name} 返回错误：{text}")
-        content = result.get("content", [])
-        return parse_tool_content(content)
+        parsed = parse_tool_result(result)
+        validate_sorftime_payload(name, parsed)
+        return parsed
 
     def list_tools(self) -> list[str]:
         self._ensure_initialized()
@@ -453,6 +458,13 @@ class SorftimeMcpClient:
         names = [str(item.get("name", "")).strip() for item in tools if isinstance(item, dict)]
         names = [name for name in names if name]
         self._tool_name_map = build_tool_name_map(names)
+        by_actual = {str(item.get("name", "")).strip(): item for item in tools if isinstance(item, dict)}
+        self._tool_schemas = {}
+        for canonical, actual in self._tool_name_map.items():
+            item = by_actual.get(actual) or {}
+            schema = item.get("inputSchema") or item.get("input_schema") or {}
+            if isinstance(schema, dict):
+                self._tool_schemas[canonical] = schema
         return names
 
     def check_ready(self) -> dict[str, Any]:
@@ -668,10 +680,10 @@ class SorftimeCliClient:
         site = normalize_marketplace(marketplace)
         asin = asin.strip().upper()
         keyword = keyword.strip()
-        target = keyword.casefold()
+        target = normalize_keyword(keyword)
         keyword_row: dict[str, Any] = {}
         for row in self.keyword_rows(asin, site):
-            if row_keyword(row).casefold() == target:
+            if normalize_keyword(row_keyword(row)) == target:
                 keyword_row = dict(row)
                 break
         raw: dict[str, Any] = {"keyword_row": keyword_row}
@@ -1024,20 +1036,158 @@ def parse_mcp_response(body: str) -> dict[str, Any]:
     return json.loads(body)
 
 
-def parse_tool_content(content: list[dict[str, Any]]) -> Any:
+def parse_tool_result(result: Any) -> Any:
+    """Return usable tool data from modern and legacy MCP result shapes.
+
+    Newer MCP servers may place JSON exclusively in ``structuredContent``.
+    Older servers usually serialize it in TextContent. Sorftime responses have
+    appeared in both forms, including fenced JSON and nested JSON strings.
+    """
+    if not isinstance(result, dict):
+        return deep_parse_json(result)
+    structured = result.get("structuredContent")
+    if structured not in EMPTY:
+        return unwrap_response_envelope(deep_parse_json(structured))
+    for key in ("data", "Data", "output", "resultData"):
+        if result.get(key) not in EMPTY:
+            return unwrap_response_envelope(deep_parse_json(result.get(key)))
+    return unwrap_response_envelope(parse_tool_content(result.get("content", [])))
+
+
+def parse_tool_content(content: Any) -> Any:
     parsed: list[Any] = []
-    for item in content or []:
-        if item.get("type") == "text":
-            text = item.get("text", "")
-            try:
-                parsed.append(json.loads(text))
-            except (json.JSONDecodeError, TypeError):
-                parsed.append(text)
+    if isinstance(content, dict):
+        content = [content]
+    if not isinstance(content, list):
+        return deep_parse_json(content)
+    for item in content:
+        if not isinstance(item, dict):
+            parsed.append(deep_parse_json(item))
+            continue
+        item_type = str(item.get("type") or "").lower()
+        if item_type == "text" or "text" in item:
+            parsed.append(deep_parse_json(item.get("text", "")))
+        elif item_type == "resource" and isinstance(item.get("resource"), dict):
+            resource = item["resource"]
+            parsed.append(deep_parse_json(resource.get("text") or resource.get("blob") or resource))
         elif "data" in item:
-            parsed.append(item["data"])
+            parsed.append(deep_parse_json(item["data"]))
+        elif "json" in item:
+            parsed.append(deep_parse_json(item["json"]))
+    parsed = [value for value in parsed if value not in EMPTY]
     if not parsed:
         return {}
     return parsed[0] if len(parsed) == 1 else parsed
+
+
+def deep_parse_json(value: Any, depth: int = 0) -> Any:
+    if depth > 4:
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ""
+        fence = re.fullmatch(r"```(?:json|javascript|js)?\s*([\s\S]*?)\s*```", text, re.I)
+        if fence:
+            text = fence.group(1).strip()
+        candidates = [text]
+        match = re.search(r"([\[{][\s\S]*[\]}])", text)
+        if match and match.group(1) != text:
+            candidates.append(match.group(1))
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+                return deep_parse_json(parsed, depth + 1)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return text
+    if isinstance(value, list):
+        return [deep_parse_json(item, depth + 1) for item in value]
+    if isinstance(value, dict):
+        return {key: deep_parse_json(item, depth + 1) for key, item in value.items()}
+    return value
+
+
+def unwrap_response_envelope(value: Any) -> Any:
+    """Unwrap common Sorftime/API success envelopes without dropping metadata."""
+    current = value
+    for _ in range(5):
+        if not isinstance(current, dict):
+            break
+        code = current.get("Code", current.get("code"))
+        if code not in (None, 0, "0", 200, "200"):
+            return current
+        next_value = None
+        for key in ("Data", "data", "Result", "result", "payload", "rows", "items"):
+            candidate = current.get(key)
+            if candidate not in EMPTY:
+                next_value = candidate
+                break
+        if next_value is None or next_value is current:
+            break
+        current = deep_parse_json(next_value)
+    return current
+
+
+def adapt_tool_arguments(tool_name: str, arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    """Adapt logical arguments to the actual inputSchema returned by tools/list."""
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict) or not properties:
+        return dict(arguments)
+    allowed = set(properties)
+    result: dict[str, Any] = {}
+    aliases = {
+        "asin": ("asin", "ASIN", "productAsin"),
+        "keyword": ("keyword", "searchTerm", "keywordName"),
+        "amzSite": ("amzSite", "keywordSupportSite", "marketplace", "site", "amazonSite"),
+        "keywordSupportSite": ("keywordSupportSite", "amzSite", "marketplace", "site", "amazonSite"),
+        "marketplace": ("marketplace", "amzSite", "keywordSupportSite", "site", "amazonSite"),
+        "page": ("page", "pageIndex", "pageNum"),
+        "positionType": ("positionType", "position_type", "type"),
+        "productTrendType": ("productTrendType", "trendType", "trend_type"),
+    }
+    for source_key, value in arguments.items():
+        candidates = aliases.get(source_key, (source_key,))
+        target = next((name for name in candidates if name in allowed), None)
+        if target:
+            result[target] = value
+    required = schema.get("required") or []
+    # Keep original keys only when schema is permissive or aliases did not cover them.
+    if schema.get("additionalProperties") is not False:
+        for key, value in arguments.items():
+            if key in allowed and key not in result:
+                result[key] = value
+    missing = [name for name in required if name not in result]
+    if missing:
+        raise RuntimeError(
+            f"Sorftime {tool_name} 参数无法匹配 MCP inputSchema，缺少：{'、'.join(map(str, missing))}"
+        )
+    return result
+
+
+def validate_sorftime_payload(tool_name: str, payload: Any) -> None:
+    """Raise clear errors for Sorftime business-level failures hidden in tool data."""
+    if not isinstance(payload, dict):
+        return
+    code = payload.get("Code", payload.get("code"))
+    message = first_non_empty(
+        payload.get("Message"), payload.get("message"), payload.get("Msg"), payload.get("msg")
+    )
+    if code not in (None, 0, "0", 200, "200"):
+        raise RuntimeError(f"Sorftime {tool_name} 业务错误（Code={code}）：{message or payload}")
+    request_left = first_non_empty(
+        payload.get("RequestLeft"), payload.get("requestLeft"), payload.get("request_left")
+    )
+    data = first_non_empty(payload.get("Data"), payload.get("data"), payload.get("Result"), payload.get("result"))
+    if request_left not in EMPTY:
+        try:
+            exhausted = float(str(request_left).replace(",", "")) <= 0
+        except ValueError:
+            exhausted = False
+        if exhausted and data in EMPTY:
+            raise RuntimeError(f"Sorftime {tool_name} 可用请求次数不足（RequestLeft={request_left}）")
+    if message not in EMPTY and is_error_text(str(message)) and data in EMPTY:
+        raise RuntimeError(f"Sorftime {tool_name} 返回错误：{message}")
 
 
 def collect_dict_rows(data: Any) -> list[dict[str, Any]]:
@@ -1064,10 +1214,21 @@ def collect_dict_rows(data: Any) -> list[dict[str, Any]]:
     return []
 
 
+def normalize_field_key(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+
+
+def normalize_keyword(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold().strip()
+    return re.sub(r"\s+", " ", text)
+
+
 def find_value(data: Any, keys: set[str]) -> Any:
+    normalized_keys = {normalize_field_key(key) for key in keys}
     if isinstance(data, dict):
         for key, value in data.items():
-            if key in keys and value not in EMPTY and not is_error_text(value):
+            if (key in keys or normalize_field_key(key) in normalized_keys) and value not in EMPTY and not is_error_text(value):
                 return value
         for value in data.values():
             found = find_value(value, keys)
@@ -1078,6 +1239,10 @@ def find_value(data: Any, keys: set[str]) -> Any:
             found = find_value(item, keys)
             if found not in EMPTY:
                 return found
+    elif isinstance(data, str):
+        parsed = deep_parse_json(data)
+        if parsed is not data and parsed != data:
+            return find_value(parsed, keys)
     return ""
 
 
@@ -1168,9 +1333,9 @@ def row_keyword(row: dict[str, Any]) -> str:
 
 
 def find_keyword_row(data: Any, keyword: str) -> dict[str, Any]:
-    target = keyword.strip().casefold()
+    target = normalize_keyword(keyword)
     for row in collect_dict_rows(data):
-        if row_keyword(row).casefold() == target:
+        if normalize_keyword(row_keyword(row)) == target:
             return dict(row)
     return {}
 
@@ -1282,7 +1447,28 @@ def summarize_errors(raw: dict[str, Any]) -> str:
                 walk(item)
 
     walk(raw)
-    return "; ".join(messages) or "Sorftime 未返回匹配数据。"
+    if messages:
+        return "; ".join(messages)
+    shapes: list[str] = []
+    for name, value in raw.items():
+        if value in EMPTY:
+            continue
+        if isinstance(value, dict):
+            keys = list(value.keys())[:12]
+            shapes.append(f"{name}: object keys={','.join(map(str, keys)) or '(none)'}")
+        elif isinstance(value, list):
+            first = value[0] if value else None
+            if isinstance(first, dict):
+                keys = list(first.keys())[:12]
+                shapes.append(f"{name}: list[{len(value)}] keys={','.join(map(str, keys))}")
+            else:
+                shapes.append(f"{name}: list[{len(value)}]")
+        else:
+            text = str(value).replace("\n", " ")[:160]
+            shapes.append(f"{name}: {type(value).__name__} {text}")
+    if shapes:
+        return "Sorftime 已返回内容但未识别到目标字段；响应结构：" + " | ".join(shapes[:8])
+    return "Sorftime 未返回匹配数据。"
 
 
 def domain_for_site(site: str) -> int:
@@ -1332,21 +1518,26 @@ TRAFFIC_SHARE_KEYS = {
     "自然流量占比", "广告流量占比", "流量比例", "流量贡献", "traffic_share",
     "trafficShare", "flowShare", "flow_share", "clickShare", "click_share", "share",
     "TrafficShare", "ClickShare", "FlowShare", "trafficRate", "flowRatio",
+    "trafficPercentage", "TrafficPercentage", "trafficPercent", "searchTrafficShare",
 }
 ABA_RANK_KEYS = {
     "ABA热度排名", "ABA排名", "ABA", "ABA Rank", "aba_rank", "abaRank",
     "searchFrequencyRank", "search_frequency_rank", "SearchFrequencyRank",
     "关键词热度排名", "搜索频率排名", "Search Frequency Rank", "SFR",
     "weeklySearchFrequencyRank", "abaWeeklyRank", "ABA周排名",
+    "SearchFrequencyRanking", "searchFrequencyRanking", "ABARanking", "abaHeatRank",
 }
 SEARCH_VOLUME_KEYS = {
     "搜索量", "月搜索量", "周搜索量", "关键词搜索量", "search_volume", "searchVolume",
     "monthly_search_volume", "MonthlySearchVolume", "SearchVolume", "searches",
     "keywordSearchVolume", "monthlySearchVolume", "weeklySearchVolume",
+    "searchVolumeOfMonth", "SearchVolumeOfMonth", "searchVolumeOfWeek",
+    "SearchVolumeOfWeek", "monthlySearches", "weeklySearches",
 }
 PRICE_KEYS = {
     "price", "价格", "currentPrice", "current_price", "buyBoxPrice", "buybox_price",
     "salePrice", "SalesPrice", "ListingSalesPrice", "amazonPrice", "BuyBoxPrice",
+    "listingPrice", "ListingPrice", "listingPriceAmount", "priceValue", "lowestPrice",
 }
 COUPON_KEYS = {
     "优惠券", "coupon", "Coupon", "couponValue", "coupon_value", "couponAmount",
@@ -1370,19 +1561,23 @@ SALES_KEYS = {
     "本产品月销量", "月销量", "sales", "monthSales", "monthlySales", "month_sales_volume",
     "monthly_sales", "salesVolume", "ListingSalesVolumeOfMonth", "MonthSaleVolume",
     "SalesVolume", "estimatedSales", "estimateSales",
+    "SalesVolumeOfMonth", "salesVolumeOfMonth", "ListingSalesVolume", "monthlySaleVolume",
 }
 RANK_KEYS = {
     "产品排名", "大类排名", "rank", "bsr", "BSR", "productRank", "categoryRank",
     "subcategorySalesVolumeRank", "bestSellerRank", "CategoryRank", "SalesRank",
     "BestSellerRank", "parentCategoryRank",
+    "bigCategoryRank", "BigCategoryRank", "rankingOfCategory", "categoryBsrRank",
 }
 RATING_KEYS = {
     "星级", "评分", "rating", "ratings", "reviewRating", "linkRating", "Rating",
     "Star", "star", "stars", "averageRating",
+    "starRating", "ratingValue", "reviewScore",
 }
 REVIEW_KEYS = {
     "评论数", "评价数量", "评价数", "review_count", "reviews", "ratingCount",
     "reviewCount", "Ratings", "ReviewCount", "ratingsCount", "totalReviews",
+    "reviewNum", "reviewsNum", "commentCount", "reviewAmount",
 }
 DATE_KEYS = {
     "date", "time", "recordDate", "captureDate", "exposureTime", "statDate",
