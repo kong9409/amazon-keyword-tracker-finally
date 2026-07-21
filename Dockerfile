@@ -3,7 +3,10 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     APP_MODE=hosted \
-    HOST=0.0.0.0
+    HOST=0.0.0.0 \
+    APP_DATA_DIR=/app/data \
+    APP_EXPORT_DIR=/app/data/exports \
+    APP_TIMEZONE=Asia/Shanghai
 
 WORKDIR /app
 
@@ -18,6 +21,10 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+
+# Mount the Zeabur persistent volume at /app/data so encrypted schedule
+# credentials, history and scheduled Excel files survive redeploys.
+VOLUME ["/app/data"]
 
 # Zeabur 会自动注入 PORT；app.py 读取 $PORT 并监听 0.0.0.0。
 CMD ["python", "app.py", "--no-browser"]

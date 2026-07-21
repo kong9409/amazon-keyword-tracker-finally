@@ -6,6 +6,7 @@
   const sourceBadge = $("sourceBadge");
   const ownerId = getOwnerId();
   let jobTimer = null;
+  let dailyControlTouched = false;
 
   const tableFields = [
     "date", "asin", "keyword", "traffic_share", "aba_rank", "search_volume",
@@ -104,7 +105,9 @@
     data.set("owner_id", ownerId);
     data.set("outputMode", $("outputMode").value);
     data.set("auto_download", (!$("autoDownload").disabled && $("autoDownload").checked) ? "true" : "false");
-    data.set("daily_enabled", "false");
+    data.set("daily_enabled", $("dailyEnabled").checked ? "true" : "false");
+    data.set("run_time", "09:00");
+    data.set("timezone", "Asia/Shanghai");
     data.set("remember_connection", "false");
     return data;
   }
@@ -198,6 +201,45 @@
     }
   }
 
+  function renderDailyStatus(job) {
+    const status = $("dailyStatus");
+    const links = $("dailyLinks");
+    status.classList.remove("daily-error");
+    links.innerHTML = "";
+    if (!job) {
+      status.textContent = "首次开始抓取后生效。Zeabur 需挂载持久化卷到 /app/data。";
+      return;
+    }
+    if (!dailyControlTouched) $("dailyEnabled").checked = Boolean(job.enabled);
+    const summary = job.payload_summary || {};
+    const scope = summary.asin_count && summary.keyword_count
+      ? `${summary.asin_count} 个 ASIN × ${summary.keyword_count} 个关键词 · ${summary.marketplace || "US"}`
+      : "";
+    if (!job.enabled) {
+      status.textContent = "每日定时抓取已关闭。勾选后再次点击“开始抓取”即可开启。";
+      return;
+    }
+    const lastRun = job.latest_run_at ? `；最近执行：${job.latest_run_at}` : "；尚未到首次执行时间";
+    status.textContent = `已开启：每天 ${job.run_time || "09:00"}（北京时间）${scope ? ` · ${scope}` : ""}${lastRun}`;
+    if (job.last_error) {
+      status.textContent += `；提示：${job.last_error}`;
+      status.classList.add("daily-error");
+    }
+    if (job.latest_excel) {
+      links.innerHTML = `<a href="${escapeHtml(job.latest_excel)}" download>下载最近一次定时 Excel</a>`;
+    }
+  }
+
+  async function loadDailyStatus() {
+    try {
+      const payload = await api(`/api/daily?owner_id=${encodeURIComponent(ownerId)}`);
+      renderDailyStatus(payload.job || null);
+    } catch (error) {
+      $("dailyStatus").textContent = `读取定时状态失败：${error.message}`;
+      $("dailyStatus").classList.add("daily-error");
+    }
+  }
+
   async function pollJob(jobId) {
     window.clearTimeout(jobTimer);
     try {
@@ -221,6 +263,7 @@
         } else {
           toast("抓取完成");
         }
+        await loadDailyStatus();
         return;
       }
       if (job.status === "failed") {
@@ -246,6 +289,7 @@
     try {
       const payload = await api("/api/jobs", { method: "POST", body: captureFormData() });
       setProgress(payload.job);
+      if (payload.job.daily) renderDailyStatus(payload.job.daily);
       runButton.textContent = "正在抓取…";
       pollJob(payload.job.id);
     } catch (error) {
@@ -258,6 +302,7 @@
   $("testConnection").addEventListener("click", testConnection);
   $("sorftimeMode").addEventListener("change", showConnectionFields);
   $("outputMode").addEventListener("change", showOutputFields);
+  $("dailyEnabled").addEventListener("change", () => { dailyControlTouched = true; });
   $("refreshHistory").addEventListener("click", () => loadHistory(true));
 
   async function initialize() {
@@ -269,7 +314,8 @@
     }
     showConnectionFields();
     showOutputFields();
-    await loadHistory(false);
+    await Promise.all([loadHistory(false), loadDailyStatus()]);
+    window.setInterval(loadDailyStatus, 60000);
   }
 
   initialize();

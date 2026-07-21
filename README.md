@@ -133,3 +133,15 @@ python -m py_compile app.py sorftime_adapter.py lark_writer.py
 - 不再使用 `product_report` 填充以上指标。
 
 详见 `V4_FIX_NOTES.md`。
+
+## V5：每日 09:00 自动抓取
+
+- 页面默认勾选每日自动抓取，固定使用北京时间 `Asia/Shanghai` 的 `09:00`。
+- 第一次点击“开始抓取”后，会保存当时的 ASIN、关键词、站点、连接方式和输出设置。
+- 支持定时生成 Excel、写入飞书，或两者同时执行。浏览器关闭不影响后台任务；下次打开页面可下载最近一次定时 Excel。
+- Sorftime Token / Account-SK 与飞书 App Secret 会整体加密后存放，不写入普通任务 JSON。
+- 页面会显示最近一次定时执行时间、错误和 Excel 下载链接。
+
+**Zeabur 必须在 Volumes 中挂载持久化卷到 `/app/data`。** 没有持久化卷时，重新部署可能丢失定时配置和加密密钥。
+
+关闭定时：取消勾选“每日 09:00 自动抓取”，再点击一次“开始抓取”。

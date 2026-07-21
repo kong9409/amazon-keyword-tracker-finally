@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlparse
 import ipaddress
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from cryptography.fernet import Fernet, InvalidToken
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -31,13 +32,6 @@ from sorftime_adapter import build_sorftime_client, test_sorftime_connection
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-DATA_DIR = BASE_DIR / "data"
-EXPORT_DIR = BASE_DIR / "exports"
-JOB_DIR = DATA_DIR / "jobs"
-DAILY_DIR = DATA_DIR / "daily_jobs"
-CONNECTION_DIR = DATA_DIR / "local_connections"
-DB_PATH = DATA_DIR / "keyword_tracker.db"
-PID_PATH = DATA_DIR / "app.pid"
 
 # One web application for Zeabur or local use. Zeabur injects PORT automatically.
 APP_MODE = (os.getenv("APP_MODE") or ("hosted" if os.getenv("PORT") else "local")).strip().lower()
@@ -45,6 +39,17 @@ HOSTED_MODE = APP_MODE in {"hosted", "zeabur", "cloud"}
 APP_HOST = os.getenv("HOST") or ("0.0.0.0" if HOSTED_MODE else "127.0.0.1")
 APP_PORT = int(os.getenv("PORT") or os.getenv("KEYWORD_TRACKER_PORT", "8766"))
 DEFAULT_TIMEZONE = os.getenv("APP_TIMEZONE", "Asia/Shanghai")
+
+# Zeabur should mount a persistent volume at /app/data. Daily configuration,
+# encrypted credentials, history and scheduled Excel files all live there.
+DATA_DIR = Path(os.getenv("APP_DATA_DIR") or (BASE_DIR / "data")).expanduser()
+EXPORT_DIR = Path(os.getenv("APP_EXPORT_DIR") or (DATA_DIR / "exports" if HOSTED_MODE else BASE_DIR / "exports")).expanduser()
+JOB_DIR = DATA_DIR / "jobs"
+DAILY_DIR = DATA_DIR / "daily_jobs"
+CONNECTION_DIR = DATA_DIR / "local_connections"
+DB_PATH = DATA_DIR / "keyword_tracker.db"
+PID_PATH = DATA_DIR / "app.pid"
+SCHEDULER_KEY_PATH = DATA_DIR / ".scheduler.key"
 HOSTED_MCP_HOSTS = [item.strip().lower() for item in os.getenv("SORFTIME_ALLOWED_MCP_HOSTS", "").split(",") if item.strip()]
 EXCEL_FONT = "Microsoft YaHei"
 
@@ -117,6 +122,54 @@ def ensure_storage() -> None:
                 conn.execute(f'ALTER TABLE captures ADD COLUMN "{field}" TEXT')
         conn.execute("CREATE INDEX IF NOT EXISTS idx_capture_owner ON captures(owner_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_capture_lookup ON captures(date, asin, keyword)")
+
+
+_SCHEDULER_CIPHER: Fernet | None = None
+_SCHEDULER_CIPHER_LOCK = threading.Lock()
+_SCHEDULER_RUN_LOCK = threading.Lock()
+
+
+def scheduler_cipher() -> Fernet:
+    """Return a stable cipher used to encrypt scheduled credentials at rest."""
+    global _SCHEDULER_CIPHER
+    with _SCHEDULER_CIPHER_LOCK:
+        if _SCHEDULER_CIPHER is not None:
+            return _SCHEDULER_CIPHER
+        configured = (os.getenv("SCHEDULER_SECRET_KEY") or "").strip()
+        if configured:
+            key = configured.encode("utf-8")
+        else:
+            SCHEDULER_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if SCHEDULER_KEY_PATH.exists():
+                key = SCHEDULER_KEY_PATH.read_bytes().strip()
+            else:
+                key = Fernet.generate_key()
+                SCHEDULER_KEY_PATH.write_bytes(key)
+                try:
+                    os.chmod(SCHEDULER_KEY_PATH, 0o600)
+                except OSError:
+                    pass
+        try:
+            _SCHEDULER_CIPHER = Fernet(key)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("SCHEDULER_SECRET_KEY 格式无效，请使用 Fernet 密钥") from exc
+        return _SCHEDULER_CIPHER
+
+
+def encrypt_daily_payload(payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return scheduler_cipher().encrypt(raw).decode("ascii")
+
+
+def decrypt_daily_payload(token: str) -> dict[str, Any]:
+    try:
+        raw = scheduler_cipher().decrypt(str(token or "").encode("ascii"))
+        value = json.loads(raw.decode("utf-8"))
+    except (InvalidToken, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("定时任务凭证无法解密；请重新填写连接并保存定时任务") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("定时任务配置格式无效，请重新保存")
+    return value
 
 
 def sanitize_owner_id(value: str) -> str:
@@ -569,11 +622,9 @@ def resolve_payload_connection(payload: dict[str, Any], *, for_daily: bool = Fal
             validate_hosted_mcp_url(entered.get("mcp_url", ""))
         elif entered.get("mode") == "mcp_stdio":
             raise ValueError("Zeabur 不接受任意命令。请选择 CLI Account-SK 或 MCP URL")
-        if for_daily or payload.get("daily_enabled"):
-            raise ValueError("网页模式不会保存 Account-SK/Token，因此暂不支持后台每日任务")
+        # Hosted daily jobs persist the current connection encrypted in /app/data.
         payload["connection"] = entered
         payload["remember_connection"] = False
-        payload["daily_enabled"] = False
         payload["download_dir"] = ""
         payload["_prepared"] = True
         return payload
@@ -588,8 +639,6 @@ def resolve_payload_connection(payload: dict[str, Any], *, for_daily: bool = Fal
     else:
         label = "Sorftime MCP URL" if entered.get("mode") == "mcp_url" else "Sorftime CLI Account-SK"
         raise ValueError(f"请先填写或测试并保存{label}")
-    if for_daily and not load_local_connection(owner_id):
-        raise ValueError("每日自动更新需要勾选‘仅保存到本机’，让本机调度器可以读取 Sorftime 连接")
     payload["connection"] = connection
     payload["download_dir"] = str(resolve_download_dir(payload.get("download_dir")))
     payload["_prepared"] = True
@@ -651,32 +700,80 @@ def public_job(job: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def public_daily_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not config:
+        return None
+    return {
+        "owner_id": config.get("owner_id", ""),
+        "enabled": bool(config.get("enabled")),
+        "run_time": config.get("run_time", "09:00"),
+        "timezone": config.get("timezone", DEFAULT_TIMEZONE),
+        "payload_summary": config.get("payload_summary", {}),
+        "last_attempt_date": config.get("last_attempt_date"),
+        "last_run_date": config.get("last_run_date"),
+        "latest_run_at": config.get("latest_run_at", ""),
+        "latest_excel": config.get("latest_excel", ""),
+        "latest_stats": config.get("latest_stats", {}),
+        "latest_lark": config.get("latest_lark"),
+        "latest_records_count": config.get("latest_records_count", 0),
+        "last_error": config.get("last_error", ""),
+        "storage_note": "Zeabur 请挂载持久化卷到 /app/data；否则重新部署后定时配置会丢失。" if HOSTED_MODE else "",
+    }
+
+
 def save_daily_job(payload: dict[str, Any]) -> dict[str, Any]:
-    if HOSTED_MODE:
-        raise ValueError("Zeabur 模式不保存 Sorftime 凭证，因此不能运行每日任务；请使用本机版")
     validate_payload(payload)
     if not payload.get("_prepared"):
         resolve_payload_connection(payload, for_daily=bool(payload.get("daily_enabled")))
     owner_id = payload.get("owner_id", "")
     if not owner_id:
         raise ValueError("浏览器任务标识无效，无法保存每日任务")
-    existing = read_json(daily_path(owner_id)) or {}
+
+    path = daily_path(owner_id)
+    existing = read_json(path) or {}
+    enabled = bool(payload.get("daily_enabled"))
+    schedule_payload = json.loads(json.dumps(payload, ensure_ascii=False))
+    schedule_payload.pop("_prepared", None)
+    schedule_payload["run_time"] = payload.get("run_time", "09:00") or "09:00"
+    schedule_payload["timezone"] = payload.get("timezone", DEFAULT_TIMEZONE) or DEFAULT_TIMEZONE
+
+    current = now_local(schedule_payload["timezone"])
+    try:
+        scheduled_time = datetime.strptime(schedule_payload["run_time"], "%H:%M").time()
+    except ValueError:
+        scheduled_time = datetime.strptime("09:00", "%H:%M").time()
+    last_attempt_date = existing.get("last_attempt_date")
+    # Saving the schedule through a manual run after 09:00 counts as today's attempt,
+    # so the scheduler will not duplicate the same batch a few seconds later.
+    if enabled and current.time() >= scheduled_time:
+        last_attempt_date = current.date().isoformat()
+
     config = {
         "owner_id": owner_id,
-        "enabled": bool(payload.get("daily_enabled")),
-        "auto_download": bool(payload.get("auto_download", True)),
-        "run_time": payload.get("run_time", "09:00"),
-        "timezone": payload.get("timezone", DEFAULT_TIMEZONE),
-        "payload": sanitize_payload_for_disk(payload),
+        "enabled": enabled,
+        "run_time": schedule_payload["run_time"],
+        "timezone": schedule_payload["timezone"],
+        "payload_summary": {
+            "asin_count": len(schedule_payload.get("asins", [])),
+            "keyword_count": len(schedule_payload.get("keywords", [])),
+            "marketplace": schedule_payload.get("marketplace", "US"),
+            "delivery": schedule_payload.get("delivery", "excel"),
+            "connection_mode": (schedule_payload.get("connection") or {}).get("mode", ""),
+        },
+        "encrypted_payload": encrypt_daily_payload(schedule_payload) if enabled else "",
+        "last_attempt_date": last_attempt_date,
         "last_run_date": existing.get("last_run_date"),
         "latest_excel": existing.get("latest_excel", ""),
-        "latest_local_excel_path": existing.get("latest_local_excel_path", ""),
         "latest_run_at": existing.get("latest_run_at", ""),
         "latest_stats": existing.get("latest_stats", {}),
+        "latest_lark": existing.get("latest_lark"),
+        "latest_records_count": existing.get("latest_records_count", 0),
         "last_error": existing.get("last_error", ""),
     }
-    write_json_atomic(daily_path(owner_id), config)
-    return config
+    if not enabled:
+        config["last_error"] = ""
+    write_json_atomic(path, config)
+    return public_daily_config(config) or {}
 
 
 def run_capture_records(payload: dict[str, Any], progress: Any | None = None):
@@ -814,8 +911,9 @@ def run_capture_job(job_id: str, payload: dict[str, Any]) -> None:
 def create_capture_job(payload: dict[str, Any]) -> dict[str, Any]:
     validate_payload(payload)
     resolve_payload_connection(payload, for_daily=bool(payload.get("daily_enabled")))
-    if not HOSTED_MODE and payload.get("owner_id") and "daily_enabled" in payload:
-        save_daily_job(payload)
+    daily_config = None
+    if payload.get("owner_id") and "daily_enabled" in payload:
+        daily_config = save_daily_job(payload)
     job_id = uuid.uuid4().hex
     total = len(payload["asins"]) * len(payload["keywords"])
     job = {
@@ -831,56 +929,95 @@ def create_capture_job(payload: dict[str, Any]) -> dict[str, Any]:
         "created_at": now_local().isoformat(timespec="seconds"),
         "logs": [f"{now_local().strftime('%H:%M:%S')} 任务已创建：{len(payload['asins'])} ASIN × {len(payload['keywords'])} 关键词。"],
         "payload": sanitize_payload_for_disk(payload),
+        "daily": daily_config,
     }
     write_json_atomic(job_path(job_id), job)
     threading.Thread(target=run_capture_job, args=(job_id, payload), daemon=True).start()
     return public_job(job)
 
 
+def run_due_daily_jobs_once() -> int:
+    """Run every enabled schedule that is due. Returns the number attempted."""
+    attempted = 0
+    if not _SCHEDULER_RUN_LOCK.acquire(blocking=False):
+        return 0
+    try:
+        for path in DAILY_DIR.glob("*.json"):
+            config = read_json(path)
+            if not config or not config.get("enabled"):
+                continue
+            tz_name = config.get("timezone", DEFAULT_TIMEZONE)
+            now = now_local(tz_name)
+            run_time = config.get("run_time", "09:00")
+            try:
+                due = datetime.strptime(run_time, "%H:%M").time()
+            except ValueError:
+                config["last_error"] = f"{now.isoformat(timespec='seconds')} 定时时间格式错误：{run_time}"
+                write_json_atomic(path, config)
+                continue
+            today = now.date().isoformat()
+            if now.time() < due or config.get("last_attempt_date") == today:
+                continue
+
+            attempted += 1
+            # Claim today's run before calling external services, avoiding a retry every minute
+            # after a provider error or container thread overlap.
+            config["last_attempt_date"] = today
+            config["last_error"] = ""
+            write_json_atomic(path, config)
+            try:
+                encrypted = config.get("encrypted_payload", "")
+                if not encrypted:
+                    raise RuntimeError("定时任务没有保存连接凭证，请在页面重新勾选并开始抓取一次")
+                payload = decrypt_daily_payload(encrypted)
+                payload["owner_id"] = config.get("owner_id", payload.get("owner_id", ""))
+                payload["daily_enabled"] = True
+                payload["run_time"] = run_time
+                payload["timezone"] = tz_name
+                payload["_prepared"] = True
+
+                records, stats = run_capture_records(payload)
+                excel_url = ""
+                local_excel_path = ""
+                if payload.get("delivery", "excel") in {"excel", "both"}:
+                    owner_suffix = str(config.get("owner_id", ""))[-8:] or "scheduled"
+                    filename = f"daily-keyword-tracker-{owner_suffix}-{now.strftime('%Y%m%d-%H%M%S')}.xlsx"
+                    excel_url, local_excel_path = write_excel_exports(make_workbook(records, stats), filename, payload)
+
+                lark_result = None
+                if payload.get("delivery") in {"lark", "both"}:
+                    lark_result = append_records_to_lark(records, payload.get("lark", {}), FIELD_COLUMNS)
+
+                warning = ""
+                if lark_result and not lark_result.get("ok"):
+                    warning = lark_result.get("message", "飞书写入失败")
+                config.update({
+                    "last_run_date": today,
+                    "latest_run_at": now.isoformat(timespec="seconds"),
+                    "latest_excel": excel_url,
+                    "latest_local_excel_path": local_excel_path,
+                    "latest_stats": stats,
+                    "latest_lark": lark_result,
+                    "latest_records_count": len(records),
+                    "last_error": warning,
+                })
+            except Exception as exc:
+                config["last_error"] = f"{now.isoformat(timespec='seconds')} {exc}"
+            write_json_atomic(path, config)
+    finally:
+        _SCHEDULER_RUN_LOCK.release()
+    return attempted
+
+
 def scheduler_loop() -> None:
     while True:
         try:
-            for path in DAILY_DIR.glob("*.json"):
-                config = read_json(path)
-                if not config or not config.get("enabled"):
-                    continue
-                tz_name = config.get("timezone", DEFAULT_TIMEZONE)
-                now = now_local(tz_name)
-                run_time = config.get("run_time", "09:00")
-                due = datetime.strptime(run_time, "%H:%M").time()
-                if now.time() < due or config.get("last_run_date") == now.date().isoformat():
-                    continue
-                payload = json.loads(json.dumps(config.get("payload", {}), ensure_ascii=False))
-                payload["owner_id"] = config.get("owner_id", payload.get("owner_id", ""))
-                payload["connection"] = load_local_connection(payload["owner_id"])
-                payload["_prepared"] = True
-                try:
-                    if not payload.get("connection"):
-                        raise RuntimeError("本机 Sorftime 连接已被删除，请重新连接后保存每日任务")
-                    records, stats = run_capture_records(payload)
-                    excel_url = ""
-                    local_excel_path = ""
-                    if payload.get("delivery", "excel") in {"excel", "both"}:
-                        filename = f"daily-keyword-tracker-{config['owner_id']}-{now.strftime('%Y%m%d-%H%M%S')}.xlsx"
-                        excel_url, local_excel_path = write_excel_exports(make_workbook(records, stats), filename, payload)
-                    if payload.get("delivery") in {"lark", "both"}:
-                        append_records_to_lark(records, payload.get("lark", {}), FIELD_COLUMNS)
-                    config.update({
-                        "last_run_date": now.date().isoformat(),
-                        "latest_run_at": now.isoformat(timespec="seconds"),
-                        "latest_excel": excel_url,
-                        "latest_local_excel_path": local_excel_path,
-                        "latest_stats": stats,
-                        "last_error": "",
-                    })
-                except Exception as exc:
-                    config["last_error"] = f"{now.isoformat(timespec='seconds')} {exc}"
-                write_json_atomic(path, config)
+            run_due_daily_jobs_once()
         except Exception as exc:
             (DATA_DIR / "scheduler-error.log").write_text(
                 f"{now_local().isoformat()} {exc}\n", encoding="utf-8"
             )
-        time.sleep(60)
+        time.sleep(30)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -905,7 +1042,9 @@ class Handler(BaseHTTPRequestHandler):
                 "hosted": HOSTED_MODE,
                 "supports_cli": True,
                 "supports_stdio": not HOSTED_MODE,
-                "supports_daily": not HOSTED_MODE,
+                "supports_daily": True,
+                "daily_time": "09:00",
+                "daily_timezone": DEFAULT_TIMEZONE,
                 "supports_local_save": not HOSTED_MODE,
             })
         if parsed.path == "/api/history":
@@ -921,11 +1060,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "records": job.get("records", [])})
             return self.send_json({"ok": True, "job": public_job(job)})
         if parsed.path == "/api/daily":
-            if HOSTED_MODE:
-                return self.send_json({"ok": True, "job": None, "disabled_reason": "Zeabur 模式不保存凭证，定时任务仅限本机版"})
             owner_id = parse_qs(parsed.query).get("owner_id", [""])[0]
             config = read_json(daily_path(owner_id)) if sanitize_owner_id(owner_id) else None
-            return self.send_json({"ok": True, "job": config})
+            return self.send_json({"ok": True, "job": public_daily_config(config)})
         if parsed.path == "/api/connection":
             owner_id = parse_qs(parsed.query).get("owner_id", [""])[0]
             saved = load_local_connection(owner_id) if sanitize_owner_id(owner_id) else None
@@ -998,7 +1135,9 @@ class Handler(BaseHTTPRequestHandler):
     def serve_file(self, path: Path) -> None:
         try:
             resolved = path.resolve()
-            if not resolved.is_file() or BASE_DIR.resolve() not in resolved.parents:
+            allowed_roots = (BASE_DIR.resolve(), EXPORT_DIR.resolve())
+            allowed = any(resolved == root or root in resolved.parents for root in allowed_roots)
+            if not resolved.is_file() or not allowed:
                 return self.send_error(404)
             content_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
             headers = {}
@@ -1043,7 +1182,7 @@ def main() -> None:
     ensure_storage()
     if not HOSTED_MODE:
         PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
-        threading.Thread(target=scheduler_loop, daemon=True).start()
+    threading.Thread(target=scheduler_loop, daemon=True).start()
     server = ThreadingHTTPServer((APP_HOST, APP_PORT), Handler)
     display_host = "127.0.0.1" if APP_HOST == "0.0.0.0" else APP_HOST
     url = f"http://{display_host}:{APP_PORT}"

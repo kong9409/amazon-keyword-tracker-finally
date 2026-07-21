@@ -34,3 +34,29 @@ SORFTIME_API_KEY
 3. 先用 1 个 ASIN + 1 个关键词测试。
 4. 检查 Amazon 站点是否正确。
 5. 查看结果“备注”列，确认是接口无字段、关键词未匹配还是账户权限/额度问题。
+
+
+## 每日 09:00 定时抓取必须配置 Volume
+
+1. 进入 Zeabur 服务。
+2. 打开 `Volumes`。
+3. 新增持久化卷，挂载路径填写：
+
+```text
+/app/data
+```
+
+4. 重新部署。
+5. 打开 `/api/health`，确认：
+
+```json
+{
+  "supports_daily": true,
+  "daily_time": "09:00",
+  "daily_timezone": "Asia/Shanghai"
+}
+```
+
+6. 回到页面，保留“每日 09:00 自动抓取”勾选并完成一次手动抓取，定时任务即保存。
+
+定时任务需要后台使用 Sorftime/飞书凭证，因此 V5 会把完整配置加密保存到 Volume；普通任务文件和前端接口不会返回明文凭证。

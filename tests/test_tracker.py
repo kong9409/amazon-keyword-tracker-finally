@@ -9,6 +9,8 @@ import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from openpyxl import load_workbook
 
@@ -500,6 +502,125 @@ class TrackerTests(unittest.TestCase):
         finally:
             app.EXPORT_DIR = original_export
             app.HOSTED_MODE = original_hosted
+
+    def test_daily_payload_is_encrypted_at_rest(self) -> None:
+        original_key_path = app.SCHEDULER_KEY_PATH
+        original_cipher = app._SCHEDULER_CIPHER
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                app.SCHEDULER_KEY_PATH = Path(temp) / ".scheduler.key"
+                app._SCHEDULER_CIPHER = None
+                payload = {
+                    "connection": {"mode": "mcp_url", "mcp_url": "https://mcp.sorftime.com/", "mcp_token": "SECRET-TOKEN"},
+                    "lark": {"feishu_app_secret": "SECRET-LARK"},
+                    "asins": ["B000000001"],
+                    "keywords": ["shower door"],
+                }
+                token = app.encrypt_daily_payload(payload)
+                self.assertNotIn("SECRET-TOKEN", token)
+                self.assertNotIn("SECRET-LARK", token)
+                self.assertEqual(app.decrypt_daily_payload(token), payload)
+                self.assertTrue(app.SCHEDULER_KEY_PATH.exists())
+        finally:
+            app.SCHEDULER_KEY_PATH = original_key_path
+            app._SCHEDULER_CIPHER = original_cipher
+
+    def test_hosted_daily_job_saves_encrypted_credentials(self) -> None:
+        original_daily = app.DAILY_DIR
+        original_key_path = app.SCHEDULER_KEY_PATH
+        original_cipher = app._SCHEDULER_CIPHER
+        original_hosted = app.HOSTED_MODE
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                app.DAILY_DIR = root / "daily_jobs"
+                app.SCHEDULER_KEY_PATH = root / ".scheduler.key"
+                app._SCHEDULER_CIPHER = None
+                app.HOSTED_MODE = True
+                payload = {
+                    "owner_id": "browser_1234567890abcdef",
+                    "asins": ["B000000001"],
+                    "keywords": ["shower door"],
+                    "marketplace": "US",
+                    "delivery": "excel",
+                    "daily_enabled": True,
+                    "auto_download": True,
+                    "run_time": "09:00",
+                    "timezone": "Asia/Shanghai",
+                    "download_dir": "",
+                    "remember_connection": False,
+                    "connection": {
+                        "mode": "mcp_url",
+                        "mcp_url": "https://mcp.sorftime.com/",
+                        "mcp_token": "SECRET-TOKEN",
+                    },
+                    "lark": {"feishu_app_id": "", "feishu_app_secret": "", "base_url": ""},
+                }
+                result = app.save_daily_job(payload)
+                self.assertTrue(result["enabled"])
+                stored = json.loads(app.daily_path(payload["owner_id"]).read_text(encoding="utf-8"))
+                serialized = json.dumps(stored, ensure_ascii=False)
+                self.assertNotIn("SECRET-TOKEN", serialized)
+                decrypted = app.decrypt_daily_payload(stored["encrypted_payload"])
+                self.assertEqual(decrypted["connection"]["mcp_token"], "SECRET-TOKEN")
+                self.assertNotIn("encrypted_payload", result)
+        finally:
+            app.DAILY_DIR = original_daily
+            app.SCHEDULER_KEY_PATH = original_key_path
+            app._SCHEDULER_CIPHER = original_cipher
+            app.HOSTED_MODE = original_hosted
+
+    def test_daily_scheduler_runs_due_job_only_once_per_day(self) -> None:
+        original_daily = app.DAILY_DIR
+        original_key_path = app.SCHEDULER_KEY_PATH
+        original_cipher = app._SCHEDULER_CIPHER
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                app.DAILY_DIR = root / "daily_jobs"
+                app.DAILY_DIR.mkdir(parents=True)
+                app.SCHEDULER_KEY_PATH = root / ".scheduler.key"
+                app._SCHEDULER_CIPHER = None
+                owner = "browser_1234567890abcdef"
+                payload = {
+                    "owner_id": owner,
+                    "asins": ["B000000001"],
+                    "keywords": ["shower door"],
+                    "marketplace": "US",
+                    "delivery": "excel",
+                    "daily_enabled": True,
+                    "auto_download": True,
+                    "run_time": "09:00",
+                    "timezone": "Asia/Shanghai",
+                    "connection": {"mode": "mcp_url", "mcp_url": "https://mcp.sorftime.com/", "mcp_token": "token"},
+                    "lark": {"feishu_app_id": "", "feishu_app_secret": "", "base_url": ""},
+                }
+                config = {
+                    "owner_id": owner,
+                    "enabled": True,
+                    "run_time": "09:00",
+                    "timezone": "Asia/Shanghai",
+                    "encrypted_payload": app.encrypt_daily_payload(payload),
+                    "last_attempt_date": None,
+                }
+                app.write_json_atomic(app.daily_path(owner), config)
+                fixed_now = datetime(2026, 7, 22, 9, 1, tzinfo=ZoneInfo("Asia/Shanghai"))
+                records = [{"owner_id": owner, "asin": "B000000001", "keyword": "shower door"}]
+                stats = {"mcp_calls": 3, "elapsed_seconds": 1.2, "tool_calls": {}, "tool_seconds": {}}
+                with patch("app.now_local", return_value=fixed_now), \
+                     patch("app.run_capture_records", return_value=(records, stats)) as run_mock, \
+                     patch("app.make_workbook", return_value=b"xlsx"), \
+                     patch("app.write_excel_exports", return_value=("/exports/daily.xlsx", "")):
+                    self.assertEqual(app.run_due_daily_jobs_once(), 1)
+                    self.assertEqual(app.run_due_daily_jobs_once(), 0)
+                self.assertEqual(run_mock.call_count, 1)
+                saved = app.read_json(app.daily_path(owner))
+                self.assertEqual(saved["last_run_date"], "2026-07-22")
+                self.assertEqual(saved["latest_excel"], "/exports/daily.xlsx")
+        finally:
+            app.DAILY_DIR = original_daily
+            app.SCHEDULER_KEY_PATH = original_key_path
+            app._SCHEDULER_CIPHER = original_cipher
 
     def test_concurrent_job_updates_are_json_serializable(self) -> None:
         # Smoke-test that ordinary progress payloads remain safe to write from worker threads.

@@ -129,7 +129,7 @@
           <label class="control setting-card">
             <span>飞书 App Secret</span>
             <input name="feishu_app_secret" id="feishuAppSecret" type="password" autocomplete="off" placeholder="粘贴 App Secret" />
-            <small>仅用于本次获取 tenant_access_token，不写入任务文件。</small>
+            <small>用于当前抓取；开启定时后会加密保存在 Zeabur 持久化卷。</small>
           </label>
           <label class="control setting-card">
             <span>飞书 Base 链接</span>
@@ -137,9 +137,25 @@
             <small>建议粘贴 /base/ 开头的直接链接；开启高级权限时需给应用所在角色读写权限。</small>
           </label>
         </div>
+
+        <div class="schedule-row">
+          <label class="check-card setting-card schedule-card" id="dailyScheduleCard">
+            <input type="checkbox" name="daily_enabled" id="dailyEnabled" checked />
+            <span>
+              <strong>每日 09:00 自动抓取（北京时间）</strong>
+              <small>点击“开始抓取”后保存当前 ASIN、关键词、站点、Sorftime 和飞书配置；每天只执行一次。</small>
+            </span>
+          </label>
+          <div class="setting-card daily-status-card">
+            <strong>定时任务状态</strong>
+            <small id="dailyStatus">首次开始抓取后生效。Zeabur 需挂载持久化卷到 /app/data。</small>
+            <div id="dailyLinks" class="daily-links"></div>
+          </div>
+        </div>
       </section>
 
-      <input type="hidden" name="daily_enabled" value="false" />
+      <input type="hidden" name="run_time" value="09:00" />
+      <input type="hidden" name="timezone" value="Asia/Shanghai" />
       <input type="hidden" name="remember_connection" value="false" />
       <div class="actions">
         <button type="submit" class="primary" id="runCapture">开始抓取</button>

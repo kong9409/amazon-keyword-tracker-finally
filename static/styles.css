@@ -128,3 +128,14 @@ tbody tr:hover { background: #eaf8f7; }
   .output-grid, .feishu-grid { grid-template-columns: 1fr; }
   .setting-card { min-height: auto; }
 }
+
+/* V5 daily scheduler */
+.schedule-row { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; align-items: stretch; }
+.schedule-card { min-height: 116px; background: #f1fbf8; border-color: #bfe3d9; }
+.daily-status-card { min-height: 116px; display: flex; flex-direction: column; gap: 8px; background: #f8fbfd; }
+.daily-status-card > strong { font-size: 15px; }
+.daily-status-card small { color: var(--muted); line-height: 1.55; }
+.daily-links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; }
+.daily-links a { display: inline-flex; padding: 7px 10px; border-radius: 9px; background: #dff7f5; font-weight: 800; font-size: 13px; }
+.daily-error { color: #a33b13 !important; }
+@media (max-width: 820px) { .schedule-row { grid-template-columns: 1fr; } }
