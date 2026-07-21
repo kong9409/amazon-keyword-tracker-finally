@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Amazon 关键词监控工具</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="page-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">SORFTIME · AMAZON KEYWORD TRACKER</p>
+        <h1>Amazon 关键词监控工具</h1>
+        <p class="hero-copy">输入自己的 Sorftime CLI Account-SK 或 MCP 连接，再填写 ASIN 和关键词即可抓取。无需在 Zeabur 配置 Sorftime 环境变量。</p>
+      </div>
+      <div class="source-pill source-off" id="sourceBadge">Sorftime 未连接</div>
+    </header>
+
+    <form id="captureForm" class="panel form-panel">
+      <section class="connection-box">
+        <div class="section-head connection-title">
+          <div>
+            <p class="eyebrow">STEP 1 · 连接 SORFTIME</p>
+            <h2>选择 CLI 或 MCP</h2>
+            <p class="section-copy">连接信息仅用于当前抓取，不写入 GitHub、Zeabur 变量或任务文件。</p>
+          </div>
+          <button type="button" class="secondary" id="testConnection">测试连接</button>
+        </div>
+
+        <div class="form-grid connection-grid">
+          <label class="control">
+            <span>连接方式</span>
+            <select name="sorftime_mode" id="sorftimeMode">
+              <option value="cli_account" selected>CLI（输入 Account-SK）</option>
+              <option value="mcp_url">MCP（URL + Token）</option>
+            </select>
+          </label>
+
+          <label class="control span-three" id="cliAccountField">
+            <span>Sorftime Account-SK</span>
+            <input name="sorftime_cli_account_sk" id="sorftimeCliAccountSk" type="password" autocomplete="off" placeholder="粘贴 Sorftime Account-SK" />
+            <small>服务器使用已安装的官方 sorftime-cli 调用固定数据接口，不执行用户输入的命令。</small>
+          </label>
+
+          <label class="control span-two" id="mcpUrlField" hidden>
+            <span>Sorftime MCP URL</span>
+            <input name="sorftime_mcp_url" id="sorftimeMcpUrl" autocomplete="off" value="https://mcp.sorftime.com/" placeholder="https://mcp.sorftime.com/" />
+          </label>
+          <label class="control" id="mcpTokenField" hidden>
+            <span>Bearer Token / Account-SK</span>
+            <input name="sorftime_mcp_token" id="sorftimeMcpToken" type="password" autocomplete="off" placeholder="粘贴 Token" />
+          </label>
+        </div>
+        <div class="connection-footer">
+          <span></span>
+          <span id="connectionStatus" class="connection-status">填写连接信息后可直接测试或开始抓取</span>
+        </div>
+      </section>
+
+      <section class="form-grid two-col input-section">
+        <div class="field-block">
+          <div class="field-head">
+            <label for="asinsText">STEP 2 · ASIN</label>
+            <a href="/api/template?kind=asins">下载模板</a>
+          </div>
+          <textarea id="asinsText" name="asins_text" rows="7" placeholder="每行一个 ASIN，例如：&#10;B0XXXXXXXX&#10;B0YYYYYYYY"></textarea>
+          <input type="file" name="asins_file" accept=".xlsx,.csv,.txt" />
+        </div>
+        <div class="field-block">
+          <div class="field-head">
+            <label for="keywordsText">STEP 3 · 关键词</label>
+            <a href="/api/template?kind=keywords">下载模板</a>
+          </div>
+          <textarea id="keywordsText" name="keywords_text" rows="7" placeholder="每行一个关键词，例如：&#10;under bed storage&#10;storage containers"></textarea>
+          <input type="file" name="keywords_file" accept=".xlsx,.csv,.txt" />
+        </div>
+      </section>
+
+      <section class="form-grid settings-grid simple-settings">
+        <label class="control">
+          <span>Amazon 站点</span>
+          <select name="marketplace" id="marketplace">
+            <option value="US">Amazon US</option>
+            <option value="CA">Amazon CA</option>
+            <option value="UK">Amazon UK</option>
+            <option value="DE">Amazon DE</option>
+            <option value="FR">Amazon FR</option>
+            <option value="IT">Amazon IT</option>
+            <option value="ES">Amazon ES</option>
+            <option value="JP">Amazon JP</option>
+            <option value="AU">Amazon AU</option>
+          </select>
+        </label>
+        <label class="check-card compact-check">
+          <input type="checkbox" name="auto_download" id="autoDownload" checked />
+          <span><strong>完成后自动下载 Excel</strong><small>结果仍会保留“再次下载”链接。</small></span>
+        </label>
+      </section>
+
+      <input type="hidden" name="outputMode" value="excel" />
+      <input type="hidden" name="daily_enabled" value="false" />
+      <input type="hidden" name="remember_connection" value="false" />
+      <div class="actions">
+        <button type="submit" class="primary" id="runCapture">开始抓取并导出</button>
+      </div>
+    </form>
+
+    <section class="panel progress-panel">
+      <div class="progress-head">
+        <div>
+          <p class="eyebrow">RUN STATUS</p>
+          <h2 id="progressTitle">等待任务</h2>
+          <p id="progressSub">输入连接、ASIN 和关键词后开始抓取。</p>
+        </div>
+        <strong id="progressPct">0%</strong>
+      </div>
+      <div class="progress-track"><div id="progressFill"></div></div>
+      <div class="metric-grid">
+        <article><span>接口调用次数</span><strong id="mcpCalls">0</strong></article>
+        <article><span>运行时间</span><strong id="elapsedTime">0.00 秒</strong></article>
+        <article><span>已完成</span><strong id="doneCount">0 / 0</strong></article>
+        <article><span>结果条数</span><strong id="recordCount">0</strong></article>
+      </div>
+      <pre id="logBox" class="log-box">暂无运行日志</pre>
+      <div id="resultLinks" class="result-links"></div>
+    </section>
+
+    <section class="panel result-panel">
+      <div class="section-head">
+        <div><p class="eyebrow">LATEST RESULTS</p><h2>最新运营结果</h2></div>
+        <button type="button" class="secondary" id="refreshHistory">刷新结果</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>日期</th><th>ASIN</th><th>关键词</th><th>流量占比</th><th>ABA热度</th><th>搜索量</th>
+            <th>自然位</th><th>广告位</th><th>价格</th><th>优惠券</th><th>秒杀价</th><th>Prime价</th>
+            <th>月销量</th><th>大类排名</th><th>评分</th><th>评价数</th><th>链接</th><th>状态</th><th>备注</th>
+          </tr></thead>
+          <tbody id="historyBody"><tr><td colspan="19" class="empty">暂无结果</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <div id="toast" class="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
