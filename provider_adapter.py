@@ -534,13 +534,70 @@ class GenericMcpClient(SorftimeMcpClient):
 
     def list_tools(self) -> list[str]:
         self._ensure_initialized()
-        response = self._post({"jsonrpc": "2.0", "id": int(time.time() * 1000), "method": "tools/list", "params": {}})
-        if "error" in response:
-            error = response.get("error") or {}
-            raise RuntimeError(error.get("message") or f"{self.provider_name} MCP tools/list failed")
-        tools = response.get("result", {}).get("tools", []) or []
-        self._generic_tools = [item for item in tools if isinstance(item, dict) and item.get("name")]
+        # MCP tools/list supports cursor pagination.  SellerSprite can expose more
+        # than forty tools and may return them in several pages; reading only the
+        # first page can make a valid key look as if it has no ASIN/keyword tools.
+        tools: list[dict[str, Any]] = []
+        cursor = ""
+        seen_cursors: set[str] = set()
+        for page_index in range(20):
+            params: dict[str, Any] = {}
+            if cursor:
+                params["cursor"] = cursor
+            response = self._post({
+                "jsonrpc": "2.0",
+                "id": int(time.time() * 1000) + page_index,
+                "method": "tools/list",
+                "params": params,
+            })
+            if "error" in response:
+                error = response.get("error") or {}
+                raise RuntimeError(error.get("message") or f"{self.provider_name} MCP tools/list failed")
+            result = response.get("result", {}) or {}
+            page_tools = result.get("tools", []) if isinstance(result, dict) else []
+            tools.extend(item for item in (page_tools or []) if isinstance(item, dict) and item.get("name"))
+            next_cursor = ""
+            if isinstance(result, dict):
+                next_cursor = str(result.get("nextCursor") or result.get("next_cursor") or "").strip()
+            if not next_cursor or next_cursor in seen_cursors:
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+        # Preserve server order but remove duplicate definitions that can occur
+        # when a provider changes the cursor while a request is in flight.
+        unique: list[dict[str, Any]] = []
+        seen_names: set[str] = set()
+        for item in tools:
+            name = str(item.get("name") or "").strip()
+            if not name or name in seen_names:
+                continue
+            seen_names.add(name)
+            unique.append(item)
+        self._generic_tools = unique
         return [str(item.get("name")) for item in self._generic_tools]
+
+    @staticmethod
+    def _tool_blob(tool: dict[str, Any]) -> str:
+        """Build a searchable description from the complete MCP tool metadata.
+
+        Some MCP servers expose an opaque ``name`` and put the human/tool code in
+        ``title`` or ``annotations.title``.  The previous matcher looked only at
+        name, description and inputSchema, which produced false negatives.
+        """
+        annotations = tool.get("annotations") if isinstance(tool.get("annotations"), dict) else {}
+        meta = tool.get("_meta") if isinstance(tool.get("_meta"), dict) else {}
+        parts = [
+            tool.get("name"), tool.get("title"), tool.get("displayName"), tool.get("description"),
+            annotations.get("title"), annotations.get("description"),
+            meta.get("title"), meta.get("description"),
+            tool.get("inputSchema") or tool.get("input_schema") or {},
+            tool.get("outputSchema") or tool.get("output_schema") or {},
+        ]
+        return " ".join(
+            json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value or "")
+            for value in parts
+        ).lower()
 
     def check_ready(self) -> dict[str, Any]:
         names = self.list_tools()
@@ -565,8 +622,7 @@ class GenericMcpClient(SorftimeMcpClient):
         }[kind]
         best: tuple[int, dict[str, Any]] | None = None
         for tool in self._generic_tools:
-            schema = tool.get("inputSchema") or tool.get("input_schema") or {}
-            blob = " ".join([str(tool.get("name") or ""), str(tool.get("description") or ""), json.dumps(schema, ensure_ascii=False)]).lower()
+            blob = self._tool_blob(tool)
             score = sum(weight for token, weight in weighted if token in blob)
             # Discourage non-Amazon namespaces.
             if any(token in blob for token in ("tiktok", "temu", "shopee", "walmart", "ebay")):
@@ -698,41 +754,274 @@ class GenericMcpClient(SorftimeMcpClient):
 
 
 class SellerSpriteMcpClient(GenericMcpClient):
-    """卖家精灵远程 MCP 适配器。
+    """卖家精灵 MCP 固定工具直连适配器。
 
-    工具优先级来自用户提供的《各插件 MCP 目录表》，通过 tools/list
-    读取实时 inputSchema 后调用，不再使用卖家精灵开放 API 路由。
+    卖家精灵模式不再因为 tools/list 的名称、命名空间或授权列表未被
+    识别而终止整个任务。连接成功后，程序按官方工具 Code 直接调用；
+    tools/list 只用于读取真实工具名与 inputSchema。某个工具不可用时，
+    仅对应字段留空并记录错误，其他工具继续执行。
     """
 
-    PREFERRED_TOOLS = {
+    DIRECT_TOOL_GROUPS = {
         "traffic": ("traffic_keyword", "traffic_keyword_stat", "traffic_extend"),
-        "keyword": ("aba_research_monthly", "aba_research_weekly", "keyword_research", "keyword_research_trends"),
+        "aba": ("aba_research_monthly", "aba_research_weekly"),
+        "keyword": ("keyword_research", "keyword_research_trends", "keyword_miner"),
         "product": ("asin_detail_with_coupon_trend", "asin_detail", "keepa_info"),
-        "ranking": ("traffic_keyword", "traffic_keyword_stat", "traffic_source"),
         "sales": ("competitor_lookup", "asin_sales_trend", "asin_prediction"),
     }
 
+    TRACKER_TOOL_CODES = tuple(dict.fromkeys(
+        code for values in DIRECT_TOOL_GROUPS.values() for code in values
+    ))
+
     def __init__(self, url: str = SELLERSPRITE_MCP_URL, token: str = "") -> None:
-        # Endpoint is deliberately fixed to the official SellerSprite MCP server.
-        # Ignore any client-supplied URL so deployments cannot accidentally point
-        # credentials at an untrusted endpoint.
-        super().__init__(SELLERSPRITE_MCP_URL, str(token or "").strip(), provider_name="卖家精灵", source_name="sellersprite_mcp")
+        # 地址固定为卖家精灵官方 MCP，避免把密钥发送到用户误填的地址。
+        super().__init__(
+            SELLERSPRITE_MCP_URL,
+            str(token or "").strip(),
+            provider_name="卖家精灵",
+            source_name="sellersprite_mcp",
+        )
+        self._direct_cache: dict[tuple[str, str, str, str], Any] = {}
 
     def _auth_headers(self) -> dict[str, str]:
         if not self.token:
             return {}
         return {"secret-key": self.token}
 
+    @staticmethod
+    def _normalize_tool_text(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+    def _official_code(self, tool: dict[str, Any]) -> str:
+        """从 name/title/metadata/description 中定位卖家精灵官方 Code。"""
+        annotations = tool.get("annotations") if isinstance(tool.get("annotations"), dict) else {}
+        meta = tool.get("_meta") if isinstance(tool.get("_meta"), dict) else {}
+        values = [
+            tool.get("name"), tool.get("title"), tool.get("displayName"),
+            annotations.get("title"), meta.get("title"), tool.get("description"),
+        ]
+        normalized_values = [self._normalize_tool_text(value) for value in values if value]
+        for expected in self.TRACKER_TOOL_CODES:
+            expected_norm = self._normalize_tool_text(expected)
+            compact_expected = expected_norm.replace("_", "")
+            for value in normalized_values:
+                if value == expected_norm or value.endswith("_" + expected_norm):
+                    return expected
+                if compact_expected and compact_expected in value.replace("_", ""):
+                    return expected
+        return ""
+
+    @staticmethod
+    def _display_tool(tool: dict[str, Any]) -> str:
+        annotations = tool.get("annotations") if isinstance(tool.get("annotations"), dict) else {}
+        title = tool.get("title") or tool.get("displayName") or annotations.get("title")
+        name = str(tool.get("name") or "").strip()
+        return f"{name}（{title}）" if title and str(title).strip() != name else name
+
+    def _tool_for_code(self, code: str) -> dict[str, Any] | None:
+        """优先使用 tools/list 返回的真实名称和 Schema。"""
+        for tool in self._generic_tools:
+            if self._official_code(tool) == code:
+                return tool
+        # 有些服务直接把 Code 放在 name 中，但 metadata 不完整。
+        normalized_code = self._normalize_tool_text(code)
+        for tool in self._generic_tools:
+            name = self._normalize_tool_text(tool.get("name"))
+            if name == normalized_code or name.endswith("_" + normalized_code):
+                return tool
+        return None
+
     def _select_tool(self, kind: str) -> dict[str, Any] | None:
-        preferred = self.PREFERRED_TOOLS.get(kind, ())
-        by_name = {str(tool.get("name") or "").strip().lower(): tool for tool in self._generic_tools}
-        for expected in preferred:
-            if expected in by_name:
-                return by_name[expected]
-            for actual_name, tool in by_name.items():
-                if actual_name.endswith("." + expected) or actual_name.endswith("/" + expected) or actual_name.endswith("_" + expected):
+        # 保留给页面诊断和旧测试使用；实际抓取使用 _call_first_direct。
+        alias = "aba" if kind == "keyword" else kind
+        codes = self.DIRECT_TOOL_GROUPS.get(alias, ())
+        for code in codes:
+            tool = self._tool_for_code(code)
+            if tool:
+                return tool
+        if kind == "ranking":
+            for code in self.DIRECT_TOOL_GROUPS["traffic"]:
+                tool = self._tool_for_code(code)
+                if tool:
                     return tool
-        return super()._select_tool(kind)
+        return None
+
+    @staticmethod
+    def _dedupe_arguments(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        unique: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in candidates:
+            key = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique
+
+    def _argument_candidates(
+        self,
+        code: str,
+        tool: dict[str, Any] | None,
+        asin: str,
+        keyword: str,
+        site: str,
+    ) -> list[dict[str, Any]]:
+        """生成直连参数；有 inputSchema 时始终优先按真实 Schema 组装。"""
+        candidates: list[dict[str, Any]] = []
+        if tool:
+            try:
+                candidates.append(self._schema_arguments(tool, asin, keyword, site))
+            except Exception:
+                # Schema 中存在无法自动推断的字段时，继续尝试官方常见参数。
+                pass
+
+        page = {"page": 1, "pageSize": 100}
+        site_variants = (
+            {"marketplace": site},
+            {"country": site},
+            {"site": site},
+            {"market": site},
+        )
+        if code.startswith("traffic_") or code.startswith("asin_") or code in {
+            "competitor_lookup", "keepa_info",
+        }:
+            for site_args in site_variants:
+                candidates.extend([
+                    {"asin": asin, **site_args},
+                    {"asin": asin, "keyword": keyword, **site_args},
+                    {"asin": asin, **site_args, **page},
+                    {"asins": [asin], **site_args},
+                ])
+        if code.startswith("keyword_") or code.startswith("aba_"):
+            for site_args in site_variants:
+                candidates.extend([
+                    {"keyword": keyword, **site_args},
+                    {"keyword": keyword, **site_args, **page},
+                    {"keywords": [keyword], **site_args},
+                ])
+
+        # 最后的宽松参数用于服务端 Schema 允许附加字段的情况。
+        candidates.extend([
+            {"asin": asin, "keyword": keyword, "marketplace": site},
+            {"asin": asin, "keyword": keyword, "country": site},
+        ])
+        unique = self._dedupe_arguments(candidates)
+        # 避免无 Schema 时为了猜参数消耗过多 MCP 次数。实时 Schema 参数始终排在首位。
+        return unique[:6]
+
+    @staticmethod
+    def _is_retryable_argument_error(message: str) -> bool:
+        text = str(message or "").lower()
+        return any(token in text for token in (
+            "invalid params", "invalid parameter", "missing", "required",
+            "参数", "必填", "field required", "validation", "schema",
+        ))
+
+    def _invoke_direct_name(self, name: str, arguments: dict[str, Any], code: str) -> Any:
+        started = time.perf_counter()
+        response = self._post({
+            "jsonrpc": "2.0",
+            "id": int(time.time() * 1000),
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        })
+        elapsed = time.perf_counter() - started
+        with self._lock:
+            self._mcp_calls += 1
+            self._tool_calls[code] += 1
+            self._tool_seconds[code] += elapsed
+        if "error" in response:
+            error = response.get("error") or {}
+            detail = error.get("data")
+            suffix = f"：{detail}" if detail else ""
+            raise RuntimeError(str(error.get("message") or f"{code} 调用失败") + suffix)
+        result = response.get("result", {})
+        if isinstance(result, dict) and result.get("isError"):
+            raise RuntimeError(str(parse_tool_result(result)))
+        return parse_tool_result(result)
+
+    def _call_direct_code(self, code: str, asin: str, keyword: str, site: str) -> Any:
+        cache_key = (code, asin, keyword.casefold(), site)
+        if cache_key in self._direct_cache:
+            return self._direct_cache[cache_key]
+
+        tool = self._tool_for_code(code)
+        # 若 tools/list 无法识别 Code，仍直接用官方 Code 调用。
+        actual_name = str((tool or {}).get("name") or code).strip()
+        errors: list[str] = []
+        for arguments in self._argument_candidates(code, tool, asin, keyword, site):
+            try:
+                parsed = self._invoke_direct_name(actual_name, arguments, code)
+                self._direct_cache[cache_key] = parsed
+                return parsed
+            except Exception as exc:
+                message = str(exc)
+                errors.append(message)
+                if not self._is_retryable_argument_error(message):
+                    break
+        raise RuntimeError(f"{code}：" + "；".join(errors[:3]))
+
+    def _call_first_direct(
+        self,
+        group: str,
+        asin: str,
+        keyword: str,
+        site: str,
+        raw: dict[str, Any],
+    ) -> Any:
+        errors: list[str] = []
+        for code in self.DIRECT_TOOL_GROUPS[group]:
+            try:
+                data = self._call_direct_code(code, asin, keyword, site)
+                raw[code] = data
+                if data not in EMPTY:
+                    return data
+            except Exception as exc:
+                raw[f"{code}_error"] = str(exc)
+                errors.append(str(exc))
+        if errors:
+            raw[f"{group}_error"] = "；".join(errors[:4])
+        return {}
+
+    def check_ready(self) -> dict[str, Any]:
+        names = self.list_tools()
+        if not names:
+            raise RuntimeError(
+                "卖家精灵 MCP 已连接，但 tools/list 没有返回工具。请检查 MCP Key、套餐和密钥状态。"
+            )
+
+        authorized_codes = sorted({
+            code for code in (self._official_code(tool) for tool in self._generic_tools) if code
+        })
+        resolved_codes = {
+            code: str(tool.get("name") or "")
+            for code in self.TRACKER_TOOL_CODES
+            if (tool := self._tool_for_code(code))
+        }
+        resolved_tools: dict[str, str] = {}
+        for group, codes in self.DIRECT_TOOL_GROUPS.items():
+            for code in codes:
+                if code in resolved_codes:
+                    resolved_tools[group] = resolved_codes[code]
+                    break
+        if "traffic" in resolved_tools:
+            resolved_tools.setdefault("ranking", resolved_tools["traffic"])
+        return {
+            "source": self.source_name,
+            "tool_count": len(names),
+            "recognized_tools": sorted(set(resolved_codes.values())),
+            "resolved_tools": resolved_tools,
+            "resolved_codes": resolved_codes,
+            "authorized_codes": authorized_codes,
+            "available_tools": [self._display_tool(tool) for tool in self._generic_tools],
+            "missing_tools": [code for code in self.TRACKER_TOOL_CODES if code not in resolved_codes],
+            "direct_call": True,
+            "note": (
+                f"已连接卖家精灵 MCP，读取 {len(names)} 个工具。"
+                "抓取时将按官方 Code 直接调用；未在 tools/list 中识别到的 Code 不再阻止任务。"
+            ),
+        }
 
     def capture_keyword(self, asin: str, keyword: str, marketplace: str) -> dict[str, Any]:
         self._ensure_initialized()
@@ -741,41 +1030,58 @@ class SellerSpriteMcpClient(GenericMcpClient):
         site = normalize_marketplace(marketplace)
         asin, keyword = asin.strip().upper(), keyword.strip()
         raw: dict[str, Any] = {}
-        data: dict[str, Any] = {}
-        for kind in ("traffic", "keyword", "product", "ranking", "sales"):
-            try:
-                data[kind] = self._call_kind(kind, asin, keyword, site)
-                raw[kind] = data[kind]
-            except Exception as exc:
-                data[kind] = {}
-                raw[f"{kind}_error"] = str(exc)
 
-        traffic_row = find_keyword_row(data["traffic"], keyword) or data["traffic"]
-        keyword_row = find_keyword_row(data["keyword"], keyword) or data["keyword"]
-        product = parse_product_detail(data["product"])
+        traffic = self._call_first_direct("traffic", asin, keyword, site, raw)
+        aba = self._call_first_direct("aba", asin, keyword, site, raw)
+        keyword_data = self._call_first_direct("keyword", asin, keyword, site, raw)
+        product_data = self._call_first_direct("product", asin, keyword, site, raw)
+        sales_data = self._call_first_direct("sales", asin, keyword, site, raw)
+
+        traffic_row = find_keyword_row(traffic, keyword) or traffic
+        aba_row = find_keyword_row(aba, keyword) or aba
+        keyword_row = find_keyword_row(keyword_data, keyword) or keyword_data
+        product = parse_product_detail(product_data)
+
         return _finish_result(
-            provider=self.provider_name, asin=asin, site=site, raw=raw,
-            traffic_share=_percent_value(find_value(traffic_row, TRAFFIC_SHARE_KEYS | {"trafficPercentage", "trafficRate"})),
-            aba_rank=find_value(keyword_row, ABA_RANK_KEYS | {"searchRank", "searchesRank", "abaRank"}),
-            search_volume=find_value(keyword_row, SEARCH_VOLUME_KEYS | {"searches", "monthlySearches", "searchVolume"}),
-            organic_position=_position_value(first_non_empty(
-                find_value(traffic_row, ORGANIC_POSITION_KEYS | {"rankPosition"}),
-                find_value(data["ranking"], ORGANIC_POSITION_KEYS | {"rankPosition"}),
+            provider=self.provider_name,
+            asin=asin,
+            site=site,
+            raw=raw,
+            traffic_share=_percent_value(find_value(
+                traffic_row,
+                TRAFFIC_SHARE_KEYS | {"trafficPercentage", "trafficRate", "trafficShare"},
             )),
-            ad_position=_position_value(first_non_empty(
-                find_value(traffic_row, AD_POSITION_KEYS | {"adPosition"}),
-                find_value(data["ranking"], AD_POSITION_KEYS | {"adPosition"}),
+            aba_rank=first_non_empty(
+                find_value(aba_row, ABA_RANK_KEYS | {"searchRank", "searchesRank", "abaRank"}),
+                find_value(keyword_row, ABA_RANK_KEYS | {"searchRank", "searchesRank", "abaRank"}),
+            ),
+            search_volume=first_non_empty(
+                find_value(keyword_row, SEARCH_VOLUME_KEYS | {"searches", "monthlySearches", "searchVolume"}),
+                find_value(aba_row, SEARCH_VOLUME_KEYS | {"searches", "monthlySearches", "searchVolume"}),
+            ),
+            organic_position=_position_value(find_value(
+                traffic_row,
+                ORGANIC_POSITION_KEYS | {"rankPosition", "organicPosition", "organicRank"},
+            )),
+            ad_position=_position_value(find_value(
+                traffic_row,
+                AD_POSITION_KEYS | {"adPosition", "sponsoredPosition", "adRank"},
             )),
             price=product.get("price", ""),
             coupon_value=product.get("coupon_value", ""),
             deal_price=product.get("deal_price", ""),
             prime_price=product.get("prime_discount_price", ""),
-            sales=first_non_empty(product.get("estimated_sales", ""), find_value(data["sales"], SALES_KEYS | {"units", "monthlyUnits", "monthSales", "sales30Days"})),
+            sales=first_non_empty(
+                product.get("estimated_sales", ""),
+                find_value(sales_data, SALES_KEYS | {
+                    "units", "monthlyUnits", "monthSales", "sales30Days", "salesVolume",
+                }),
+            ),
             product_rank=product.get("product_rank", ""),
             small_category_rank=product.get("small_category_rank", ""),
             rating=product.get("rating", ""),
             review_count=product.get("review_count", ""),
-            product_url=find_value(data["product"], {"url", "productUrl", "amazonUrl"}),
+            product_url=find_value(product_data, {"url", "productUrl", "amazonUrl"}),
         )
 
 

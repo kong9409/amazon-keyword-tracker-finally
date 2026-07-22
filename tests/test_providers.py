@@ -24,16 +24,51 @@ class FakeSellerSprite(SellerSpriteMcpClient):
     def list_tools(self):
         return [item["name"] for item in self._generic_tools]
 
-    def _call_kind(self, kind, asin, keyword, site):
-        if kind in {"traffic", "ranking"}:
+    def _call_first_direct(self, group, asin, keyword, site, raw):
+        if group == "traffic":
             return {"data": [{"keywords": "关键词1", "trafficPercentage": 0.135, "rankPosition": {"position": 7}, "adPosition": {"position": 2}}]}
-        if kind == "keyword":
-            return {"data": [{"keyword": "关键词1", "searchRank": 321, "searches": 10000}]}
-        if kind == "product":
+        if group == "aba":
+            return {"data": [{"keyword": "关键词1", "searchRank": 321}]}
+        if group == "keyword":
+            return {"data": [{"keyword": "关键词1", "searches": 10000}]}
+        if group == "product":
             return {"data": {"price": 29.99, "bsrRank": 456, "smallCategoryRank": 45, "rating": 4.6, "ratings": 789}}
-        if kind == "sales":
+        if group == "sales":
             return {"data": [{"asin": "B000000001", "units": 654}]}
         return {}
+
+
+class PaginatedSellerSprite(SellerSpriteMcpClient):
+    def __init__(self):
+        super().__init__(token="secret")
+        self.requests = []
+
+    def _ensure_initialized(self):
+        return None
+
+    def _post(self, payload):
+        self.requests.append(payload)
+        cursor = (payload.get("params") or {}).get("cursor")
+        if not cursor:
+            return {
+                "jsonrpc": "2.0",
+                "id": payload.get("id"),
+                "result": {
+                    "tools": [{"name": "market_research", "description": "市场研究"}],
+                    "nextCursor": "page-2",
+                },
+            }
+        return {
+            "jsonrpc": "2.0",
+            "id": payload.get("id"),
+            "result": {
+                "tools": [
+                    {"name": "opaque-tool-1", "title": "traffic_keyword", "description": "关键词反查"},
+                    {"name": "seller-sprite:asin-detail", "description": "ASIN详情"},
+                    {"name": "competitor_lookup", "description": "查竞品销量"},
+                ]
+            },
+        }
 
 
 class FakeXiyou(XiyouApiClient):
@@ -141,6 +176,49 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(client._select_tool("product")["name"], "asin_detail_with_coupon_trend")
         self.assertEqual(client._select_tool("ranking")["name"], "traffic_keyword")
         self.assertEqual(client._select_tool("sales")["name"], "competitor_lookup")
+
+    def test_sellersprite_reads_all_tool_pages_and_title_metadata(self):
+        client = PaginatedSellerSprite()
+        names = client.list_tools()
+        self.assertEqual(len(names), 4)
+        self.assertEqual((client.requests[1].get("params") or {}).get("cursor"), "page-2")
+        self.assertEqual(client._select_tool("traffic")["name"], "opaque-tool-1")
+        self.assertEqual(client._select_tool("product")["name"], "seller-sprite:asin-detail")
+        ready = client.check_ready()
+        self.assertGreaterEqual(ready["tool_count"], 4)
+        self.assertIn("traffic", ready["resolved_tools"])
+        self.assertIn("product", ready["resolved_tools"])
+
+    def test_sellersprite_unrecognized_tools_do_not_block_direct_mode(self):
+        client = SellerSpriteMcpClient(token="secret")
+        client._generic_tools = [{"name": "trademark_list", "description": "商标列表"}]
+        client.list_tools = lambda: ["trademark_list"]
+        ready = client.check_ready()
+        self.assertTrue(ready["direct_call"])
+        self.assertEqual(ready["recognized_tools"], [])
+        self.assertIn("直接调用", ready["note"])
+
+    def test_sellersprite_directly_calls_official_code_when_not_listed(self):
+        class DirectSellerSprite(SellerSpriteMcpClient):
+            def __init__(self):
+                super().__init__(token="secret")
+                self.calls = []
+                self._generic_tools = [{"name": "trademark_list", "description": "商标列表"}]
+
+            def _ensure_initialized(self):
+                return None
+
+            def _post(self, payload):
+                self.calls.append(payload)
+                params = payload.get("params") or {}
+                if payload.get("method") == "tools/call":
+                    self.assert_name = params.get("name")
+                    return {"jsonrpc": "2.0", "id": payload.get("id"), "result": {"structuredContent": {"data": []}}}
+                return {"jsonrpc": "2.0", "id": payload.get("id"), "result": {}}
+
+        client = DirectSellerSprite()
+        client._call_direct_code("traffic_keyword", "B000000001", "关键词1", "US")
+        self.assertEqual(client.assert_name, "traffic_keyword")
 
     def test_xiyou_mcp_prefers_official_tool_names(self):
         client = XiyouMcpClient("https://mcp.xydc.com/mcp", "token")

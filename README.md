@@ -1,8 +1,8 @@
-# Amazon 关键词监控工具 by kong · V7.1 字段前置匹配版
+# Amazon 关键词监控工具 by kong · V7.4 卖家精灵 MCP 固定直连版
 
 部署在 Zeabur 的 Amazon 关键词监控工具。页面先展示固定监控字段，再选择 Sorftime、卖家精灵、SIF、西柚洞察或其他 MCP/API；工具会基于《各插件 MCP 目录表》匹配所需接口，随后输入凭证、ASIN 和关键词抓取数据。
 
-## V7 / V7.1 核心变化
+## V7 / V7.4 核心变化
 
 - **监控字段前置**：STEP 1 先展示全部 18 个输出字段，选择数据源后立即显示该软件对应的接口、覆盖状态和输出格式。
 - **新增小类排名**：位于“大类排名”之后，页面、Excel、飞书和数据库全部同步增加。
@@ -56,6 +56,11 @@
 - 产品详情、优惠和类目排名：`asin_detail_with_coupon_trend` → `asin_detail` → `keepa_info`。
 - 月销量：`competitor_lookup` → `asin_sales_trend`。
 - 后端通过 MCP `initialize`、`tools/list`、`tools/call` 调用，并使用官方要求的 `secret-key` 请求头；不再走卖家精灵 API。
+- `tools/list` 仅用于读取真实工具名和 `inputSchema`；即使名称无法识别，也会直接调用 `traffic_keyword`、`asin_detail`、`keyword_research` 等官方 Code。
+- 单个 Code 未授权、参数不匹配或无数据时，只在该字段备注中记录错误，不再导致整批任务失败。
+- `tools/list` 会自动翻页读取全部授权工具，不再只读取第一页。
+- 支持从 `name`、`title`、`annotations.title` 和命名空间中识别工具代码。
+- 卖家精灵连接成功后，不再用“是否识别到 Amazon 工具”作为任务拦截条件。程序按官方工具 Code 直接调用；某个工具不可用只影响对应字段，其他字段继续抓取。
 
 ### SIF MCP
 
@@ -126,4 +131,4 @@ node --check static/app.js
 python -m py_compile app.py provider_adapter.py sorftime_adapter.py lark_writer.py
 ```
 
-V7 已使用模拟响应测试字段前置匹配、百分比格式、小类排名、西柚广告位和当前月销量逻辑；未使用付费账号进行真实线上调用，各软件最终覆盖度仍取决于账号套餐和接口实际返回。
+V7.4 已使用模拟响应测试字段前置匹配、百分比格式、小类排名、西柚广告位、当前月销量、卖家精灵 MCP 固定 Code 直连和部分工具失败不中断；未使用付费账号进行真实线上调用，各软件最终覆盖度仍取决于账号套餐、密钥授权和接口实际返回。

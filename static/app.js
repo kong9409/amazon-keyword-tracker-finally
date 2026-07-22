@@ -161,7 +161,7 @@
 
     let detail = "填写连接信息后可直接测试或开始抓取";
     if (provider === "sorftime") detail = $("sorftimeMode").value === "mcp_url" ? "填写 Sorftime MCP URL 和 Token" : "填写 Sorftime CLI Account-SK";
-    if (provider === "sellersprite") detail = "卖家精灵 MCP URL 已内置，只需填写 MCP Key";
+    if (provider === "sellersprite") detail = "卖家精灵 MCP URL 已内置；输入 Key 后按官方工具 Code 直接调用";
     if (provider === "sif") detail = "填写 SIF MCP URL 和 MCP Key";
     if (provider === "xiyou") detail = $("xiyouMode").value === "api" ? "填写西柚洞察 OpenAPI Key" : "填写西柚洞察 MCP URL 和 Token";
     if (provider === "custom") detail = $("customMode").value === "api" ? "填写其他软件 API Endpoint" : "填写其他软件 MCP URL";
