@@ -233,105 +233,6 @@ class BaseApiClient:
         return
 
 
-class SellerSpriteApiClient(BaseApiClient):
-    source_name = "sellersprite_api"
-    provider_name = "卖家精灵"
-
-    def __init__(self, base_url: str, api_key: str) -> None:
-        if not api_key.strip():
-            raise ValueError("请填写卖家精灵 API Key")
-        super().__init__(base_url or "https://api.sellersprite.com", api_key)
-        self._traffic_cache: dict[tuple[str, str], Any] = {}
-        self._aba_cache: dict[tuple[str, str], Any] = {}
-        self._detail_cache: dict[tuple[str, str], Any] = {}
-        self._sales_cache: dict[tuple[str, str], Any] = {}
-
-    def headers(self) -> dict[str, str]:
-        return {"Content-Type": "application/json", "Accept": "application/json", "secret-key": self.api_key}
-
-    def check_ready(self) -> dict[str, Any]:
-        return {
-            "source": self.source_name,
-            "tool_count": 4,
-            "recognized_tools": ["reverse_asin", "aba_research", "asin_detail", "competitor_lookup"],
-            "missing_tools": [],
-            "note": "API Key 已读取；为避免消耗额度，真实数据权限将在抓取时验证。",
-        }
-
-    def _traffic(self, asin: str, site: str) -> Any:
-        key = (asin, site)
-        if key not in self._traffic_cache:
-            payload = {"marketplace": site, "asin": asin, "page": 1, "size": 1000}
-            self._traffic_cache[key] = self._request("POST", "/v1/traffic/keyword", payload, tool_name="traffic_keyword")
-        return self._traffic_cache[key]
-
-    def _aba(self, keyword: str, site: str) -> Any:
-        key = (keyword.casefold(), site)
-        if key not in self._aba_cache:
-            payload = {"marketplace": site, "keywordList": [keyword], "exactFlag": True, "reverseType": "M", "page": 1, "size": 50}
-            self._aba_cache[key] = self._request("POST", "/v1/aba/research", payload, tool_name="aba_research")
-        return self._aba_cache[key]
-
-    def _detail(self, asin: str, site: str) -> Any:
-        key = (asin, site)
-        if key not in self._detail_cache:
-            self._detail_cache[key] = self._request("GET", f"/v1/asin/{site}/{asin}", tool_name="asin_detail")
-        return self._detail_cache[key]
-
-    def _sales(self, asin: str, site: str) -> Any:
-        key = (asin, site)
-        if key not in self._sales_cache:
-            payload = {"marketplace": site, "asins": [asin], "page": 1, "size": 20}
-            self._sales_cache[key] = self._request("POST", "/v1/product/competitor-lookup", payload, tool_name="competitor_lookup")
-        return self._sales_cache[key]
-
-    def capture_keyword(self, asin: str, keyword: str, marketplace: str) -> dict[str, Any]:
-        site = normalize_marketplace(marketplace)
-        asin, keyword = asin.strip().upper(), keyword.strip()
-        raw: dict[str, Any] = {}
-        try:
-            traffic = self._traffic(asin, site)
-            raw["traffic_keyword"] = traffic
-            row = find_keyword_row(traffic, keyword)
-        except Exception as exc:
-            row = {}
-            raw["traffic_keyword_error"] = str(exc)
-        try:
-            aba = self._aba(keyword, site)
-            raw["aba_research"] = aba
-            aba_row = find_keyword_row(aba, keyword) or (collect_dict_rows(aba)[0] if collect_dict_rows(aba) else {})
-        except Exception as exc:
-            aba_row = {}
-            raw["aba_research_error"] = str(exc)
-        try:
-            detail = self._detail(asin, site)
-            raw["asin_detail"] = detail
-            product = parse_product_detail(detail)
-        except Exception as exc:
-            detail, product = {}, {}
-            raw["asin_detail_error"] = str(exc)
-        sales = product.get("estimated_sales", "")
-        if sales in EMPTY:
-            try:
-                sales_data = self._sales(asin, site)
-                raw["competitor_lookup"] = sales_data
-                sales = find_value(sales_data, SALES_KEYS | {"units", "monthlyUnits", "monthSales", "sales30Days"})
-            except Exception as exc:
-                raw["competitor_lookup_error"] = str(exc)
-        return _finish_result(
-            provider=self.provider_name, asin=asin, site=site, raw=raw,
-            traffic_share=_percent_value(find_value(row, TRAFFIC_SHARE_KEYS | {"trafficPercentage"})),
-            aba_rank=first_non_empty(find_value(aba_row, ABA_RANK_KEYS | {"searchRank", "searchesRank"}), find_value(row, {"searchesRank"})),
-            search_volume=first_non_empty(find_value(aba_row, SEARCH_VOLUME_KEYS | {"searches"}), find_value(row, {"searches"})),
-            organic_position=_position_value(find_value(row, ORGANIC_POSITION_KEYS | {"rankPosition"})),
-            ad_position=_position_value(find_value(row, AD_POSITION_KEYS | {"adPosition"})),
-            price=product.get("price", ""), coupon_value=product.get("coupon_value", ""),
-            deal_price=product.get("deal_price", ""), prime_price=product.get("prime_discount_price", ""),
-            sales=sales, product_rank=product.get("product_rank", ""), rating=product.get("rating", ""),
-            small_category_rank=product.get("small_category_rank", ""),
-            review_count=product.get("review_count", ""),
-        )
-
 
 class XiyouApiClient(BaseApiClient):
     source_name = "xiyou_api"
@@ -794,6 +695,82 @@ class GenericMcpClient(SorftimeMcpClient):
         )
 
 
+class SellerSpriteMcpClient(GenericMcpClient):
+    """卖家精灵远程 MCP 适配器。
+
+    工具优先级来自用户提供的《各插件 MCP 目录表》，通过 tools/list
+    读取实时 inputSchema 后调用，不再使用卖家精灵开放 API 路由。
+    """
+
+    PREFERRED_TOOLS = {
+        "traffic": ("traffic_keyword", "traffic_keyword_stat", "traffic_extend"),
+        "keyword": ("aba_research_monthly", "aba_research_weekly", "keyword_research", "keyword_research_trends"),
+        "product": ("asin_detail_with_coupon_trend", "asin_detail", "keepa_info"),
+        "ranking": ("traffic_keyword", "traffic_keyword_stat", "traffic_source"),
+        "sales": ("competitor_lookup", "asin_sales_trend", "asin_prediction"),
+    }
+
+    def __init__(self, url: str, token: str) -> None:
+        if not str(url or "").strip():
+            raise ValueError("请填写卖家精灵 MCP URL")
+        super().__init__(str(url).strip(), str(token or "").strip(), provider_name="卖家精灵", source_name="sellersprite_mcp")
+
+    def _select_tool(self, kind: str) -> dict[str, Any] | None:
+        preferred = self.PREFERRED_TOOLS.get(kind, ())
+        by_name = {str(tool.get("name") or "").strip().lower(): tool for tool in self._generic_tools}
+        for expected in preferred:
+            if expected in by_name:
+                return by_name[expected]
+            for actual_name, tool in by_name.items():
+                if actual_name.endswith("." + expected) or actual_name.endswith("/" + expected) or actual_name.endswith("_" + expected):
+                    return tool
+        return super()._select_tool(kind)
+
+    def capture_keyword(self, asin: str, keyword: str, marketplace: str) -> dict[str, Any]:
+        self._ensure_initialized()
+        if not self._generic_tools:
+            self.list_tools()
+        site = normalize_marketplace(marketplace)
+        asin, keyword = asin.strip().upper(), keyword.strip()
+        raw: dict[str, Any] = {}
+        data: dict[str, Any] = {}
+        for kind in ("traffic", "keyword", "product", "ranking", "sales"):
+            try:
+                data[kind] = self._call_kind(kind, asin, keyword, site)
+                raw[kind] = data[kind]
+            except Exception as exc:
+                data[kind] = {}
+                raw[f"{kind}_error"] = str(exc)
+
+        traffic_row = find_keyword_row(data["traffic"], keyword) or data["traffic"]
+        keyword_row = find_keyword_row(data["keyword"], keyword) or data["keyword"]
+        product = parse_product_detail(data["product"])
+        return _finish_result(
+            provider=self.provider_name, asin=asin, site=site, raw=raw,
+            traffic_share=_percent_value(find_value(traffic_row, TRAFFIC_SHARE_KEYS | {"trafficPercentage", "trafficRate"})),
+            aba_rank=find_value(keyword_row, ABA_RANK_KEYS | {"searchRank", "searchesRank", "abaRank"}),
+            search_volume=find_value(keyword_row, SEARCH_VOLUME_KEYS | {"searches", "monthlySearches", "searchVolume"}),
+            organic_position=_position_value(first_non_empty(
+                find_value(traffic_row, ORGANIC_POSITION_KEYS | {"rankPosition"}),
+                find_value(data["ranking"], ORGANIC_POSITION_KEYS | {"rankPosition"}),
+            )),
+            ad_position=_position_value(first_non_empty(
+                find_value(traffic_row, AD_POSITION_KEYS | {"adPosition"}),
+                find_value(data["ranking"], AD_POSITION_KEYS | {"adPosition"}),
+            )),
+            price=product.get("price", ""),
+            coupon_value=product.get("coupon_value", ""),
+            deal_price=product.get("deal_price", ""),
+            prime_price=product.get("prime_discount_price", ""),
+            sales=first_non_empty(product.get("estimated_sales", ""), find_value(data["sales"], SALES_KEYS | {"units", "monthlyUnits", "monthSales", "sales30Days"})),
+            product_rank=product.get("product_rank", ""),
+            small_category_rank=product.get("small_category_rank", ""),
+            rating=product.get("rating", ""),
+            review_count=product.get("review_count", ""),
+            product_url=find_value(data["product"], {"url", "productUrl", "amazonUrl"}),
+        )
+
+
 class XiyouMcpClient(GenericMcpClient):
     """西柚洞察远程 MCP 适配器。
 
@@ -1133,7 +1110,7 @@ def build_data_client(connection: dict[str, Any] | None = None) -> DataClient:
     if provider == "sorftime":
         return build_sorftime_client(connection)
     if provider == "sellersprite":
-        return SellerSpriteApiClient(str(connection.get("api_url") or "https://api.sellersprite.com"), str(connection.get("api_key") or ""))
+        return SellerSpriteMcpClient(str(connection.get("mcp_url") or ""), str(connection.get("mcp_token") or ""))
     if provider == "xiyou":
         if mode == "mcp_url":
             return XiyouMcpClient(

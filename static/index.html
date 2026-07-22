@@ -56,7 +56,7 @@
             <span>数据源软件</span>
             <select name="data_provider" id="dataProvider">
               <option value="sorftime" selected>Sorftime（MCP / CLI）</option>
-              <option value="sellersprite">卖家精灵（API）</option>
+              <option value="sellersprite">卖家精灵（MCP）</option>
               <option value="sif">SIF（MCP）</option>
               <option value="xiyou">西柚洞察（MCP / API）</option>
               <option value="custom">其他软件（MCP / API）</option>
@@ -92,14 +92,14 @@
 
           <div class="provider-fields span-three" id="sellerSpriteFields" hidden>
             <label class="control setting-card flex-two">
-              <span>卖家精灵 API Key</span>
-              <input name="sellersprite_api_key" id="sellerSpriteApiKey" type="password" autocomplete="off" placeholder="粘贴卖家精灵 API Key" />
-              <small>需使用卖家精灵开放 API 权限，不是网页登录密码。</small>
+              <span>卖家精灵 MCP URL</span>
+              <input name="sellersprite_mcp_url" id="sellerSpriteMcpUrl" autocomplete="off" placeholder="粘贴卖家精灵 MCP URL" />
+              <small>使用卖家精灵提供的远程 MCP 地址；不再使用开放 API Base URL。</small>
             </label>
             <label class="control setting-card flex-two">
-              <span>卖家精灵 API Base URL</span>
-              <input name="sellersprite_api_url" id="sellerSpriteApiUrl" autocomplete="off" value="https://api.sellersprite.com" />
-              <small>通常保持默认值。</small>
+              <span>卖家精灵 MCP Token / Key</span>
+              <input name="sellersprite_mcp_token" id="sellerSpriteMcpToken" type="password" autocomplete="off" placeholder="粘贴卖家精灵 MCP Token / Key" />
+              <small>工具会读取 tools/list，并基于 MCP 目录表匹配流量词、ABA、详情和销量工具。</small>
             </label>
           </div>
 

@@ -1,4 +1,4 @@
-# Zeabur 部署步骤 · V7
+# Zeabur 部署步骤 · V7.1
 
 1. 解压项目，把内部文件直接覆盖到 GitHub 仓库根目录。
 2. 确认存在 `Dockerfile`、`app.py`、`provider_adapter.py`、`sorftime_adapter.py`、`lark_writer.py` 和 `static/`。
@@ -11,8 +11,7 @@
 ## 连接要求
 
 - Sorftime CLI：容器已安装 `sorftime-cli`，用户只输入 Account-SK。
-- Sorftime/SIF/西柚/其他 MCP：必须是 Zeabur 可访问的公网 HTTPS URL。
-- 卖家精灵/西柚/其他 API：必须是公网 HTTPS API 地址。
+- Sorftime、卖家精灵、SIF、西柚和其他 MCP：必须填写 Zeabur 可访问的公网 HTTPS MCP URL。
 - 数据源凭证不应配置成全站公共 Zeabur 环境变量。
 
 ## 部署后检查

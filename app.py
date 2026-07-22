@@ -209,11 +209,11 @@ def normalize_connection(value: dict[str, Any] | None) -> dict[str, Any]:
     provider = str(value.get("provider", "sorftime") or "sorftime").strip().lower()
     if provider not in {"sorftime", "sellersprite", "sif", "xiyou", "custom"}:
         provider = "sorftime"
-    default_mode = "cli_account" if provider == "sorftime" else ("mcp_url" if provider in {"sif", "xiyou", "custom"} else "api")
+    default_mode = "cli_account" if provider == "sorftime" else ("mcp_url" if provider in {"sellersprite", "sif", "xiyou", "custom"} else "api")
     mode = str(value.get("mode", default_mode) or default_mode).strip().lower()
     allowed_modes = {
         "sorftime": {"cli_account", "mcp_url", "mcp_stdio"},
-        "sellersprite": {"api"},
+        "sellersprite": {"mcp_url"},
         "sif": {"mcp_url"},
         "xiyou": {"mcp_url", "api"},
         "custom": {"mcp_url", "api"},
@@ -221,10 +221,10 @@ def normalize_connection(value: dict[str, Any] | None) -> dict[str, Any]:
     if mode not in allowed_modes[provider]:
         mode = default_mode
     defaults = {
-        "sellersprite": "https://api.sellersprite.com",
         "xiyou": "https://openapi.xydc.com",
     }
     mcp_defaults = {
+        "sellersprite": "",
         "sif": "https://mcp.sif.com/mcp",
         "xiyou": "https://mcp.xydc.com/mcp",
     }
@@ -252,7 +252,7 @@ def connection_has_value(connection: dict[str, Any]) -> bool:
             return bool(connection.get("cli_account_sk"))
         return bool(connection.get("cli_command"))
     if provider == "sellersprite":
-        return bool(connection.get("api_key"))
+        return bool(connection.get("mcp_url"))
     if provider == "xiyou":
         return bool(connection.get("mcp_url") and connection.get("mcp_token")) if mode == "mcp_url" else bool(connection.get("api_key"))
     if provider == "sif":
@@ -619,9 +619,9 @@ def connection_from_form(form: SimpleForm) -> dict[str, Any]:
         })
     if provider == "sellersprite":
         return normalize_connection({
-            "provider": provider, "mode": "api",
-            "api_url": form.getfirst("sellersprite_api_url", "https://api.sellersprite.com"),
-            "api_key": form.getfirst("sellersprite_api_key"),
+            "provider": provider, "mode": "mcp_url",
+            "mcp_url": form.getfirst("sellersprite_mcp_url"),
+            "mcp_token": form.getfirst("sellersprite_mcp_token"),
         })
     if provider == "sif":
         return normalize_connection({

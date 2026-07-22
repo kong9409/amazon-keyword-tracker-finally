@@ -1,8 +1,8 @@
-# Amazon 关键词监控工具 by kong · V7 字段前置匹配版
+# Amazon 关键词监控工具 by kong · V7.1 字段前置匹配版
 
 部署在 Zeabur 的 Amazon 关键词监控工具。页面先展示固定监控字段，再选择 Sorftime、卖家精灵、SIF、西柚洞察或其他 MCP/API；工具会基于《各插件 MCP 目录表》匹配所需接口，随后输入凭证、ASIN 和关键词抓取数据。
 
-## V7 核心变化
+## V7 / V7.1 核心变化
 
 - **监控字段前置**：STEP 1 先展示全部 18 个输出字段，选择数据源后立即显示该软件对应的接口、覆盖状态和输出格式。
 - **新增小类排名**：位于“大类排名”之后，页面、Excel、飞书和数据库全部同步增加。
@@ -16,7 +16,7 @@
 | 页面选项 | 连接方式 | 页面需要填写 |
 |---|---|---|
 | Sorftime | Sorftime CLI / Sorftime MCP | Account-SK，或 MCP URL + Token |
-| 卖家精灵 | API | API Key；API Base URL 默认已填写 |
+| 卖家精灵 | MCP | MCP URL + MCP Token / Key |
 | SIF | MCP | MCP URL + MCP Key |
 | 西柚洞察 | MCP（默认）/ OpenAPI V2 | MCP URL + Token，或 API Key |
 | 其他软件 | 自定义 MCP / API | MCP URL + Token，或 API Endpoint + Key/Header |
@@ -47,12 +47,15 @@
 - 价格、优惠券、秒杀价、Prime价、月销量、大类排名、小类排名、评分、评价数：`product_detail`
 - 月销量、大类排名缺失时：`product_trend`
 
-### 卖家精灵 API
+### 卖家精灵 MCP
 
-- 反查流量词：`traffic_keyword`
-- ABA与搜索量：`keyword_research` / ABA 接口
-- 产品详情和类目排名：`asin_detail` / `keepa_info`
-- 月销量：`competitor_lookup` / `asin_sales_trend`
+- 连接：填写卖家精灵提供的 MCP URL 与 Token / Key。
+- 反查流量词、自然位、广告位：`traffic_keyword`，缺失时尝试 `traffic_keyword_stat`。
+- ABA热度：`aba_research_monthly` → `aba_research_weekly`。
+- 搜索量：`keyword_research` → ABA 工具。
+- 产品详情、优惠和类目排名：`asin_detail_with_coupon_trend` → `asin_detail` → `keepa_info`。
+- 月销量：`competitor_lookup` → `asin_sales_trend`。
+- 后端通过 MCP `initialize`、`tools/list`、`tools/call` 调用，不再走卖家精灵 API。
 
 ### SIF MCP
 

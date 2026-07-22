@@ -5,23 +5,35 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import app
-from provider_adapter import GenericApiClient, GenericMcpClient, SellerSpriteApiClient, XiyouApiClient, XiyouMcpClient, build_data_client
+from provider_adapter import GenericApiClient, GenericMcpClient, SellerSpriteMcpClient, XiyouApiClient, XiyouMcpClient, build_data_client
 
 
-class FakeSellerSprite(SellerSpriteApiClient):
-    def _request(self, method, path, payload=None, *, tool_name=""):
-        with self._lock:
-            self._calls += 1
-            self._tool_calls[tool_name] += 1
-        if path == "/v1/traffic/keyword":
-            return {"data": [{"keywords": "关键词1", "trafficPercentage": 0.135, "searches": 9000, "rankPosition": {"position": 7}, "adPosition": {"position": 2}}]}
-        if path == "/v1/aba/research":
+class FakeSellerSprite(SellerSpriteMcpClient):
+    def __init__(self):
+        super().__init__("https://mcp.example.com/mcp", "secret")
+        self._generic_tools = [
+            {"name": "traffic_keyword", "description": "关键词反查"},
+            {"name": "aba_research_monthly", "description": "ABA月数据"},
+            {"name": "asin_detail", "description": "ASIN详情"},
+            {"name": "competitor_lookup", "description": "查竞品销量"},
+        ]
+
+    def _ensure_initialized(self):
+        return None
+
+    def list_tools(self):
+        return [item["name"] for item in self._generic_tools]
+
+    def _call_kind(self, kind, asin, keyword, site):
+        if kind in {"traffic", "ranking"}:
+            return {"data": [{"keywords": "关键词1", "trafficPercentage": 0.135, "rankPosition": {"position": 7}, "adPosition": {"position": 2}}]}
+        if kind == "keyword":
             return {"data": [{"keyword": "关键词1", "searchRank": 321, "searches": 10000}]}
-        if path.startswith("/v1/asin/"):
+        if kind == "product":
             return {"data": {"price": 29.99, "bsrRank": 456, "smallCategoryRank": 45, "rating": 4.6, "ratings": 789}}
-        if path == "/v1/product/competitor-lookup":
+        if kind == "sales":
             return {"data": [{"asin": "B000000001", "units": 654}]}
-        raise AssertionError(path)
+        return {}
 
 
 class FakeXiyou(XiyouApiClient):
@@ -65,7 +77,7 @@ class FakeXiyou(XiyouApiClient):
 
 class ProviderTests(unittest.TestCase):
     def test_sellersprite_maps_required_fields(self):
-        client = FakeSellerSprite("https://api.sellersprite.com", "secret")
+        client = FakeSellerSprite()
         result = client.capture_keyword("B000000001", "关键词1", "US")
         self.assertEqual(result["traffic_share"], "13.50%")
         self.assertEqual(result["aba_rank"], 321)
@@ -94,23 +106,37 @@ class ProviderTests(unittest.TestCase):
 
     def test_connection_normalization_and_redaction(self):
         connection = app.normalize_connection({
-            "provider": "sellersprite", "mode": "api",
-            "api_key": "top-secret", "api_url": "https://api.sellersprite.com",
+            "provider": "sellersprite", "mode": "mcp_url",
+            "mcp_url": "https://mcp.example.com/mcp", "mcp_token": "top-secret",
         })
         self.assertTrue(app.connection_has_value(connection))
         clean = app.sanitize_payload_for_disk({"connection": connection, "lark": {"feishu_app_secret": "secret"}})
         self.assertEqual(clean["connection"]["provider"], "sellersprite")
-        self.assertEqual(clean["connection"]["api_key"], "")
+        self.assertEqual(clean["connection"]["mcp_token"], "")
         self.assertEqual(clean["lark"]["feishu_app_secret"], "")
 
     def test_build_provider_clients(self):
-        self.assertEqual(build_data_client({"provider": "sellersprite", "mode": "api", "api_key": "x"}).source_name, "sellersprite_api")
+        self.assertEqual(build_data_client({"provider": "sellersprite", "mode": "mcp_url", "mcp_url": "https://mcp.example.com/mcp", "mcp_token": "x"}).source_name, "sellersprite_mcp")
         self.assertEqual(build_data_client({"provider": "xiyou", "mode": "api", "api_key": "x"}).source_name, "xiyou_api")
         self.assertEqual(build_data_client({"provider": "xiyou", "mode": "mcp_url", "mcp_url": "https://mcp.xydc.com/mcp", "mcp_token": "x"}).source_name, "xiyou_mcp")
         self.assertEqual(build_data_client({"provider": "sif", "mode": "mcp_url", "mcp_url": "https://mcp.sif.com/mcp", "mcp_token": "x"}).source_name, "sif_mcp")
         self.assertIsInstance(build_data_client({"provider": "custom", "mode": "api", "api_url": "https://example.com/data"}), GenericApiClient)
         self.assertIsInstance(build_data_client({"provider": "custom", "mode": "mcp_url", "mcp_url": "https://example.com/mcp"}), GenericMcpClient)
 
+
+    def test_sellersprite_mcp_prefers_directory_tool_names(self):
+        client = SellerSpriteMcpClient("https://mcp.example.com/mcp", "token")
+        client._generic_tools = [
+            {"name": "traffic_keyword", "description": "关键词反查"},
+            {"name": "aba_research_monthly", "description": "ABA按月"},
+            {"name": "asin_detail_with_coupon_trend", "description": "详情和优惠"},
+            {"name": "competitor_lookup", "description": "销量销额"},
+        ]
+        self.assertEqual(client._select_tool("traffic")["name"], "traffic_keyword")
+        self.assertEqual(client._select_tool("keyword")["name"], "aba_research_monthly")
+        self.assertEqual(client._select_tool("product")["name"], "asin_detail_with_coupon_trend")
+        self.assertEqual(client._select_tool("ranking")["name"], "traffic_keyword")
+        self.assertEqual(client._select_tool("sales")["name"], "competitor_lookup")
 
     def test_xiyou_mcp_prefers_official_tool_names(self):
         client = XiyouMcpClient("https://mcp.xydc.com/mcp", "token")
@@ -173,6 +199,8 @@ class ProviderTests(unittest.TestCase):
             self.assertIn(f'value="{value}"', html)
         self.assertIn("Sorftime CLI", html)
         self.assertIn("Sorftime MCP", html)
+        self.assertIn("卖家精灵（MCP）", html)
+        self.assertIn("卖家精灵 MCP URL", html)
         self.assertIn("西柚洞察 MCP", html)
         self.assertIn("https://mcp.xydc.com/mcp", html)
         self.assertIn("STEP 1 · 监控字段", html)
@@ -183,6 +211,8 @@ class ProviderTests(unittest.TestCase):
         mapping = Path(app.STATIC_DIR / "field-mapping.json").read_text(encoding="utf-8")
         self.assertIn("get_asin_keyword_rank_trends · 广告位", mapping)
         self.assertIn("get_asin_order_trends · 当月销量", mapping)
+        self.assertIn("sellersprite_mcp", mapping)
+        self.assertNotIn("sellersprite_api", mapping)
 
 
 if __name__ == "__main__":

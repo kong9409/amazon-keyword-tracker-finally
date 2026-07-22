@@ -69,7 +69,7 @@
   function selectedSourceKey() {
     const provider = selectedProvider();
     if (provider === "sorftime") return $("sorftimeMode").value === "mcp_url" ? "sorftime_mcp" : "sorftime_cli";
-    if (provider === "sellersprite") return "sellersprite_api";
+    if (provider === "sellersprite") return "sellersprite_mcp";
     if (provider === "sif") return "sif_mcp";
     if (provider === "xiyou") return $("xiyouMode").value === "api" ? "xiyou_api" : "xiyou_mcp";
     return $("customMode").value === "api" ? "custom_api" : "custom_mcp";
@@ -155,13 +155,14 @@
     showXiyouModeFields();
     showCustomModeFields();
 
-    $("sellerSpriteApiKey").required = provider === "sellersprite";
+    $("sellerSpriteMcpUrl").required = provider === "sellersprite";
+    $("sellerSpriteMcpToken").required = false;
     $("sifMcpUrl").required = provider === "sif";
     $("sifMcpToken").required = provider === "sif";
 
     let detail = "填写连接信息后可直接测试或开始抓取";
     if (provider === "sorftime") detail = $("sorftimeMode").value === "mcp_url" ? "填写 Sorftime MCP URL 和 Token" : "填写 Sorftime CLI Account-SK";
-    if (provider === "sellersprite") detail = "填写卖家精灵开放 API Key";
+    if (provider === "sellersprite") detail = "填写卖家精灵 MCP URL 和 Token / Key";
     if (provider === "sif") detail = "填写 SIF MCP URL 和 MCP Key";
     if (provider === "xiyou") detail = $("xiyouMode").value === "api" ? "填写西柚洞察 OpenAPI Key" : "填写西柚洞察 MCP URL 和 Token";
     if (provider === "custom") detail = $("customMode").value === "api" ? "填写其他软件 API Endpoint" : "填写其他软件 MCP URL";
@@ -225,7 +226,7 @@
     const button = $("testConnection");
     button.disabled = true;
     const provider = selectedProvider();
-    const isApi = provider === "sellersprite" || (provider === "xiyou" && $("xiyouMode").value === "api") || (provider === "custom" && $("customMode").value === "api");
+    const isApi = (provider === "xiyou" && $("xiyouMode").value === "api") || (provider === "custom" && $("customMode").value === "api");
     const isCli = provider === "sorftime" && $("sorftimeMode").value === "cli_account";
     setConnectionState("testing", isCli ? "正在验证 Sorftime Account-SK…" : (isApi ? "正在检查 API 配置…" : "正在初始化 MCP…"));
     try {
