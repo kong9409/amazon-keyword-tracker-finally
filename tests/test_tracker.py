@@ -40,7 +40,7 @@ class FakeSorftimeClient(SorftimeMcpClient):
             self._tool_seconds[name] += time.perf_counter() - started
 
         if name == "product_traffic_terms":
-            return {"data": [{"keyword": "关键词1", "trafficShare": "12.5%"}]}
+            return {"data": [{"keyword": "关键词1", "trafficShare": "12.50%"}]}
         if name == "keyword_detail":
             return {"data": {"keyword": arguments["keyword"], "searchFrequencyRank": 321, "searchVolume": 12345}}
         if name == "keyword_search_results" and arguments["positionType"] == 0:
@@ -328,7 +328,7 @@ class TrackerTests(unittest.TestCase):
             def call_tool(self, name, arguments):
                 self.seen.append((name, dict(arguments)))
                 if name == "product_traffic_terms":
-                    return {"Data": [{"KeywordName": "关键词1", "TrafficRate": "8.8%"}]}
+                    return {"Data": [{"KeywordName": "关键词1", "TrafficRate": "8.80%"}]}
                 if name == "keyword_detail":
                     return {"Data": {"keyword": "关键词1", "Rank": 456, "monthlySearchVolume": 9999}}
                 if name == "keyword_search_results":
@@ -354,7 +354,7 @@ class TrackerTests(unittest.TestCase):
 
         client = StrictSourceClient()
         result = client.capture_keyword("B000000001", "关键词1", "US")
-        self.assertEqual(result["traffic_share"], "8.8%")
+        self.assertEqual(result["traffic_share"], "8.80%")
         self.assertEqual(result["aba_rank"], 456)
         self.assertEqual(result["search_volume"], 9999)
         self.assertEqual(result["estimated_sales"], 777)
@@ -371,7 +371,7 @@ class TrackerTests(unittest.TestCase):
         first = client.capture_keyword("B000000001", "关键词1", "US")
         second = client.capture_keyword("B000000002", "关键词1", "US")
 
-        self.assertEqual(first["traffic_share"], "12.5%")
+        self.assertEqual(first["traffic_share"], "12.50%")
         self.assertEqual(first["aba_rank"], 321)
         self.assertEqual(first["search_volume"], 12345)
         self.assertEqual(first["organic_position"], 4)
@@ -431,7 +431,7 @@ class TrackerTests(unittest.TestCase):
                 os.environ["PATH"] = old_path
 
         self.assertEqual(ready["source"], "sorftime_cli")
-        self.assertEqual(result["traffic_share"], "12.5%")
+        self.assertEqual(result["traffic_share"], "12.50%")
         self.assertEqual(result["organic_position"], 4)
         self.assertEqual(result["ad_position"], 2)
         self.assertEqual(result["price"], 29.99)
@@ -446,7 +446,7 @@ class TrackerTests(unittest.TestCase):
             "date": "2026-07-21",
             "asin": "B000000001",
             "keyword": "关键词1",
-            "traffic_share": "12.5%",
+            "traffic_share": "12.50%",
             "status": "ok",
         })
         stats = {
@@ -459,7 +459,10 @@ class TrackerTests(unittest.TestCase):
         workbook = load_workbook(io.BytesIO(content), data_only=False)
         self.assertEqual(workbook.sheetnames, ["关键词监控结果", "任务汇总"])
         headers = [cell.value for cell in workbook["关键词监控结果"][1]]
-        self.assertEqual(headers[:17], [label for _, label in app.FIELD_COLUMNS[:17]])
+        self.assertEqual(headers[:18], [label for _, label in app.FIELD_COLUMNS[:18]])
+        traffic_cell = workbook["关键词监控结果"]["D2"]
+        self.assertAlmostEqual(traffic_cell.value, 0.125)
+        self.assertEqual(traffic_cell.number_format, "0.00%")
         summary = workbook["任务汇总"]
         self.assertEqual(summary["B3"].value, 7)
         self.assertEqual(summary["B4"].value, 3.21)

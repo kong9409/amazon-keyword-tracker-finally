@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 import app
@@ -17,7 +18,7 @@ class FakeSellerSprite(SellerSpriteApiClient):
         if path == "/v1/aba/research":
             return {"data": [{"keyword": "关键词1", "searchRank": 321, "searches": 10000}]}
         if path.startswith("/v1/asin/"):
-            return {"data": {"price": 29.99, "bsrRank": 456, "rating": 4.6, "ratings": 789}}
+            return {"data": {"price": 29.99, "bsrRank": 456, "smallCategoryRank": 45, "rating": 4.6, "ratings": 789}}
         if path == "/v1/product/competitor-lookup":
             return {"data": [{"asin": "B000000001", "units": 654}]}
         raise AssertionError(path)
@@ -66,25 +67,27 @@ class ProviderTests(unittest.TestCase):
     def test_sellersprite_maps_required_fields(self):
         client = FakeSellerSprite("https://api.sellersprite.com", "secret")
         result = client.capture_keyword("B000000001", "关键词1", "US")
-        self.assertEqual(result["traffic_share"], "13.5%")
+        self.assertEqual(result["traffic_share"], "13.50%")
         self.assertEqual(result["aba_rank"], 321)
         self.assertEqual(result["organic_position"], 7)
         self.assertEqual(result["ad_position"], 2)
         self.assertEqual(result["estimated_sales"], 654)
         self.assertEqual(result["product_rank"], 456)
+        self.assertEqual(result["small_category_rank"], 45)
         self.assertEqual(result["rating"], 4.6)
         self.assertEqual(result["review_count"], 789)
 
     def test_xiyou_maps_required_fields(self):
         client = FakeXiyou("https://openapi.xydc.com", "secret")
         result = client.capture_keyword("B000000001", "关键词1", "US")
-        self.assertEqual(result["traffic_share"], "8.2%")
+        self.assertEqual(result["traffic_share"], "8.20%")
         self.assertEqual(result["aba_rank"], 222)
         self.assertEqual(result["search_volume"], 12000)
         self.assertEqual(result["organic_position"], 5)
         self.assertEqual(result["ad_position"], 1)
         self.assertEqual(result["estimated_sales"], 777)
         self.assertEqual(result["product_rank"], 999)
+        self.assertEqual(result["small_category_rank"], 12)
         self.assertEqual(result["product_url"], "https://example.com/p")
         info_payloads = [payload for _, path, payload in client.requests if path == "/v1/asins/info"]
         self.assertEqual(info_payloads, [{"entities": [{"country": "US", "asin": "B000000001"}]}])
@@ -115,17 +118,39 @@ class ProviderTests(unittest.TestCase):
             {"name": "get_asin_keywords", "description": "ASIN关键词"},
             {"name": "get_keyword_info", "description": "关键词详情"},
             {"name": "get_asin_info", "description": "ASIN详情"},
-            {"name": "get_asin_keyword_rank_hourly", "description": "关键词排名"},
+            {"name": "get_asin_keyword_rank_hourly", "description": "关键词小时排名"},
+            {"name": "get_asin_keyword_rank_trends", "description": "关键词日排名趋势"},
             {"name": "get_asin_order_trends", "description": "订单趋势"},
             {"name": "get_asin_bsr_trends", "description": "BSR趋势"},
         ]
         self.assertEqual(client._select_tool("traffic")["name"], "get_asin_keywords")
         self.assertEqual(client._select_tool("keyword")["name"], "get_keyword_info")
         self.assertEqual(client._select_tool("product")["name"], "get_asin_info")
-        self.assertEqual(client._select_tool("ranking")["name"], "get_asin_keyword_rank_hourly")
+        self.assertEqual(client._select_tool("ranking")["name"], "get_asin_keyword_rank_trends")
         self.assertEqual(client._select_tool("sales")["name"], "get_asin_order_trends")
         self.assertEqual(client._select_tool("bsr")["name"], "get_asin_bsr_trends")
         self.assertEqual(client._auth_headers(), {"Authorization": "Bearer token"})
+
+    def test_xiyou_current_month_sales_and_rank_trend_positions(self):
+        now = datetime(2026, 7, 22, tzinfo=timezone.utc)
+        sales = XiyouApiClient._current_month_sales({
+            "data": [
+                {"month": "2026-06", "orders": 500},
+                {"month": "2026-07", "orders": 888},
+            ]
+        }, now=now)
+        self.assertEqual(sales, 888)
+
+        organic, ad, organic_time, ad_time = XiyouMcpClient._rank_positions({
+            "data": [
+                {"date": "2026-07-21", "rankType": "or", "rank": 7},
+                {"date": "2026-07-21", "rankType": "sp", "rank": 2},
+            ]
+        }, "关键词1")
+        self.assertEqual(organic, 7)
+        self.assertEqual(ad, 2)
+        self.assertEqual(organic_time, "2026-07-21")
+        self.assertEqual(ad_time, "2026-07-21")
 
     def test_xiyou_defaults_to_mcp_and_token_is_redacted(self):
         connection = app.normalize_connection({"provider": "xiyou", "mcp_token": "private-token"})
@@ -150,8 +175,14 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("Sorftime MCP", html)
         self.assertIn("西柚洞察 MCP", html)
         self.assertIn("https://mcp.xydc.com/mcp", html)
+        self.assertIn("STEP 1 · 监控字段", html)
+        self.assertIn("小类排名", html)
         self.assertIn("关键词1", html)
         self.assertNotIn("真实业务关键词", html)
+
+        mapping = Path(app.STATIC_DIR / "field-mapping.json").read_text(encoding="utf-8")
+        self.assertIn("get_asin_keyword_rank_trends · 广告位", mapping)
+        self.assertIn("get_asin_order_trends · 当月销量", mapping)
 
 
 if __name__ == "__main__":

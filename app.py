@@ -69,6 +69,7 @@ FIELD_COLUMNS: list[tuple[str, str]] = [
     ("prime_discount_price", "Prime价"),
     ("estimated_sales", "月销量"),
     ("product_rank", "大类排名"),
+    ("small_category_rank", "小类排名"),
     ("rating", "评分"),
     ("review_count", "评价数"),
     ("product_url", "链接"),
@@ -412,6 +413,19 @@ def make_workbook(records: list[dict[str, Any]], stats: dict[str, Any]) -> bytes
     for record in sort_records(records):
         sheet.append([record.get(key, "") for key, _ in FIELD_COLUMNS])
 
+    # Keep traffic share as a real Excel percentage while the UI/Feishu value
+    # remains a readable string such as ``12.34%``.
+    traffic_column = next(index for index, (key, _) in enumerate(FIELD_COLUMNS, start=1) if key == "traffic_share")
+    for row_index in range(2, sheet.max_row + 1):
+        cell = sheet.cell(row=row_index, column=traffic_column)
+        text = str(cell.value or "").strip()
+        if text.endswith("%"):
+            try:
+                cell.value = float(text[:-1].replace(",", "")) / 100
+                cell.number_format = "0.00%"
+            except ValueError:
+                pass
+
     header_fill = PatternFill("solid", fgColor="176B87")
     header_font = Font(name=EXCEL_FONT, size=11, bold=True, color="FFFFFF")
     body_font = Font(name=EXCEL_FONT, size=10)
@@ -425,7 +439,7 @@ def make_workbook(records: list[dict[str, Any]], stats: dict[str, Any]) -> bytes
             cell.font = body_font
             cell.alignment = align
 
-    widths = [12, 15, 28, 13, 13, 12, 11, 11, 11, 16, 11, 11, 11, 13, 9, 11, 40,
+    widths = [12, 15, 28, 13, 13, 12, 11, 11, 11, 16, 11, 11, 11, 13, 13, 9, 11, 40,
               20, 10, 20, 20, 13, 12, 14, 12, 36]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
@@ -875,7 +889,7 @@ def run_capture_records(payload: dict[str, Any], progress: Any | None = None):
                         "keyword_rank", "organic_position", "organic_time", "ad_position", "ad_time",
                         "traffic_share", "aba_rank", "search_volume", "price", "coupon_type",
                         "coupon_value", "deal_status", "deal_price", "prime_discount_price",
-                        "estimated_sales", "product_rank", "rating", "review_count", "product_url",
+                        "estimated_sales", "product_rank", "small_category_rank", "rating", "review_count", "product_url",
                     ]}
                     result.update({"status": "failed", "message": str(exc), "raw": {}})
                 record = {

@@ -154,3 +154,31 @@ tbody tr:hover { background: #eaf8f7; }
   .provider-fields { grid-template-columns: 1fr; }
   .provider-fields .flex-two { grid-column: auto; }
 }
+
+/* V7 field-first mapping plan */
+.field-plan-box { margin-bottom: 22px; padding: 20px; border: 1px solid #c9dce5; border-radius: 18px; background: linear-gradient(135deg, #fbfdff, #f1f9fb); }
+.field-plan-head { align-items: flex-start; }
+.field-count { display: inline-flex; align-items: center; justify-content: center; min-width: 96px; padding: 10px 14px; border-radius: 999px; background: #176b87; color: #fff; font-weight: 800; white-space: nowrap; }
+.required-field-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 9px; margin-top: 16px; }
+.required-field-grid span { display: flex; min-height: 42px; align-items: center; justify-content: center; padding: 8px 10px; border: 1px solid #d3e3e9; border-radius: 10px; background: rgba(255,255,255,.9); color: #24495a; font-size: 13px; font-weight: 800; text-align: center; }
+.field-match-panel { margin-top: 16px; padding: 15px; border: 1px solid #cfe2e8; border-radius: 14px; background: #fff; }
+.field-match-summary { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+.field-match-summary > div { display: flex; flex-direction: column; gap: 4px; }
+.field-match-summary small { color: var(--muted); line-height: 1.45; }
+.coverage-badge { display: inline-flex; padding: 7px 11px; border-radius: 999px; background: #e6f5f2; color: #087f5b; font-size: 12px; font-weight: 800; white-space: nowrap; }
+.field-match-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.field-match-item { min-width: 0; padding: 10px 11px; border: 1px solid #e1eaf0; border-radius: 10px; background: #f8fbfd; }
+.field-match-item strong { display: block; margin-bottom: 4px; color: #143e51; font-size: 13px; }
+.field-match-item small { display: block; color: var(--muted); line-height: 1.4; overflow-wrap: anywhere; }
+.field-match-item.match-full { border-color: #bfe3d9; background: #f3fbf8; }
+.field-match-item.match-conditional { border-color: #f3d6a2; background: #fffaf0; }
+.field-match-item.match-dynamic { border-color: #cdd9f2; background: #f7f9ff; }
+@media (max-width: 1080px) {
+  .required-field-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .field-match-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 680px) {
+  .field-plan-head, .field-match-summary { align-items: stretch; flex-direction: column; }
+  .field-count, .coverage-badge { align-self: flex-start; }
+  .required-field-grid, .field-match-grid { grid-template-columns: 1fr 1fr; }
+}

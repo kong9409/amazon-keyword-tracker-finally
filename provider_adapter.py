@@ -30,6 +30,7 @@ from sorftime_adapter import (
     classify_coupon,
     collect_dict_rows,
     deep_parse_json,
+    extract_category_ranks,
     find_keyword_row,
     find_value,
     first_non_empty,
@@ -81,7 +82,7 @@ def _blank_result() -> dict[str, Any]:
         "aba_rank": "", "search_volume": "", "price": "",
         "coupon_type": "", "coupon_value": "", "deal_status": "否",
         "deal_price": "", "prime_discount_price": "", "estimated_sales": "",
-        "product_rank": "", "rating": "", "review_count": "", "product_url": "",
+        "product_rank": "", "small_category_rank": "", "rating": "", "review_count": "", "product_url": "",
     }
 
 
@@ -102,6 +103,7 @@ def _finish_result(
     prime_price: Any = "",
     sales: Any = "",
     product_rank: Any = "",
+    small_category_rank: Any = "",
     rating: Any = "",
     review_count: Any = "",
     product_url: Any = "",
@@ -149,6 +151,7 @@ def _finish_result(
         "prime_discount_price": normalize_money(prime_price),
         "estimated_sales": normalize_number(sales),
         "product_rank": normalize_number(scalar_rank(product_rank)),
+        "small_category_rank": normalize_number(scalar_rank(small_category_rank)),
         "rating": normalize_decimal(rating),
         "review_count": normalize_number(review_count),
         "product_url": product_url or amazon_product_url(asin, site),
@@ -325,6 +328,7 @@ class SellerSpriteApiClient(BaseApiClient):
             price=product.get("price", ""), coupon_value=product.get("coupon_value", ""),
             deal_price=product.get("deal_price", ""), prime_price=product.get("prime_discount_price", ""),
             sales=sales, product_rank=product.get("product_rank", ""), rating=product.get("rating", ""),
+            small_category_rank=product.get("small_category_rank", ""),
             review_count=product.get("review_count", ""),
         )
 
@@ -412,12 +416,15 @@ class XiyouApiClient(BaseApiClient):
         return organic, ad
 
     @staticmethod
-    def _latest_root_bsr(payload: Any) -> Any:
-        """Return the latest root-category BSR from Xiyou's trend response."""
+    def _latest_bsr_ranks(payload: Any) -> tuple[Any, Any]:
+        """Return latest root-category and deepest sub-category BSR values."""
         root_ids: set[str] = set()
+        category_meta: dict[str, tuple[bool, int, int]] = {}
         trend_rows: list[dict[str, Any]] = []
+        order_counter = 0
 
         def walk(value: Any) -> None:
+            nonlocal order_counter
             if isinstance(value, list):
                 for item in value:
                     walk(item)
@@ -427,10 +434,19 @@ class XiyouApiClient(BaseApiClient):
             tree = value.get("categoryTree")
             if isinstance(tree, list):
                 for item in tree:
-                    if not isinstance(item, dict) or not item.get("root"):
+                    if not isinstance(item, dict):
                         continue
                     category_id = first_non_empty(item.get("categoryId"), item.get("id"), item.get("nodeId"))
-                    if category_id not in EMPTY:
+                    if category_id in EMPTY:
+                        continue
+                    order_counter += 1
+                    root = bool(item.get("root") or item.get("isRoot") or item.get("is_root"))
+                    try:
+                        level = int(float(str(first_non_empty(item.get("level"), item.get("depth"), item.get("categoryLevel"), order_counter))))
+                    except (TypeError, ValueError):
+                        level = order_counter
+                    category_meta[str(category_id)] = (root, level, order_counter)
+                    if root:
                         root_ids.add(str(category_id))
             trends = value.get("trends")
             if isinstance(trends, list):
@@ -440,7 +456,7 @@ class XiyouApiClient(BaseApiClient):
                     walk(child)
 
         walk(payload)
-        candidates: list[tuple[str, Any, bool]] = []
+        candidates: list[tuple[str, Any, str, bool, int, int]] = []
         for trend in trend_rows:
             date_value = str(first_non_empty(trend.get("date"), trend.get("day"), trend.get("time"), ""))
             values = trend.get("values")
@@ -453,14 +469,67 @@ class XiyouApiClient(BaseApiClient):
                 if rank in EMPTY:
                     continue
                 category_id = first_non_empty(value_row.get("categoryId"), value_row.get("id"), value_row.get("nodeId"))
-                is_root = str(category_id) in root_ids if category_id not in EMPTY else False
-                candidates.append((date_value, rank, is_root))
+                category_key = str(category_id) if category_id not in EMPTY else ""
+                meta = category_meta.get(category_key, (category_key in root_ids, 0, 0))
+                candidates.append((date_value, rank, category_key, meta[0], meta[1], meta[2]))
 
         if candidates:
-            selected = [item for item in candidates if item[2]] or candidates
-            selected.sort(key=lambda item: item[0], reverse=True)
-            return selected[0][1]
-        return find_value(payload, RANK_KEYS | {"bsrRank", "rootRank", "ranking"})
+            latest_date = max(item[0] for item in candidates)
+            latest = [item for item in candidates if item[0] == latest_date]
+            roots = [item for item in latest if item[3]]
+            leaves = [item for item in latest if not item[3]]
+            main_rank = (roots or latest)[0][1]
+            small_rank = ""
+            if leaves:
+                leaves.sort(key=lambda item: (item[4], item[5]), reverse=True)
+                small_rank = leaves[0][1]
+            return main_rank, small_rank
+        return extract_category_ranks(payload)
+
+    @staticmethod
+    def _latest_root_bsr(payload: Any) -> Any:
+        return XiyouApiClient._latest_bsr_ranks(payload)[0]
+
+    @staticmethod
+    def _current_month_sales(payload: Any, now: datetime | None = None) -> Any:
+        """Read the current calendar month's order/sales value from trend data."""
+        current = now or datetime.now(timezone.utc)
+        target = f"{current.year:04d}-{current.month:02d}"
+        rows = collect_dict_rows(payload)
+        dated_rows: list[tuple[str, dict[str, Any]]] = []
+        undated_rows: list[dict[str, Any]] = []
+        date_keys = {"month", "yearMonth", "year_month", "statMonth", "period", "date", "day", "time"}
+        value_keys = SALES_KEYS | {
+            "orders", "orderCount", "orderVolume", "monthlyOrders", "monthOrders",
+            "units", "unitsSold", "quantity", "salesCount", "value",
+        }
+        for row in rows:
+            raw_period = find_value(row, date_keys)
+            if raw_period in EMPTY:
+                undated_rows.append(row)
+                continue
+            text = str(raw_period)
+            digits = re.sub(r"\D", "", text)
+            month_key = ""
+            match = re.search(r"(20\d{2})\D?([01]?\d)", text)
+            if match:
+                month_key = f"{int(match.group(1)):04d}-{int(match.group(2)):02d}"
+            elif len(digits) >= 6:
+                month_key = f"{digits[:4]}-{digits[4:6]}"
+            dated_rows.append((month_key, row))
+        for month_key, row in dated_rows:
+            if month_key == target:
+                value = find_value(row, value_keys)
+                if value not in EMPTY:
+                    return value
+        direct = find_value(payload, {"currentMonthOrders", "currentMonthSales", "thisMonthOrders", "monthToDateOrders"})
+        if direct not in EMPTY:
+            return direct
+        if not dated_rows and undated_rows:
+            value = find_value(undated_rows[0], value_keys)
+            if value not in EMPTY:
+                return value
+        return ""
 
     def capture_keyword(self, asin: str, keyword: str, marketplace: str) -> dict[str, Any]:
         site = normalize_marketplace(marketplace)
@@ -494,11 +563,14 @@ class XiyouApiClient(BaseApiClient):
             orders = {}
             raw["asins_orders_error"] = str(exc)
         rank = product.get("product_rank", "")
-        if rank in EMPTY:
+        small_rank = product.get("small_category_rank", "")
+        if rank in EMPTY or small_rank in EMPTY:
             try:
                 bsr = self._bsr(asin, site)
                 raw["bsr_trend"] = bsr
-                rank = self._latest_root_bsr(bsr)
+                trend_main, trend_small = self._latest_bsr_ranks(bsr)
+                rank = first_non_empty(rank, trend_main)
+                small_rank = first_non_empty(small_rank, trend_small)
             except Exception as exc:
                 raw["bsr_trend_error"] = str(exc)
         organic, ad = self._positions(row)
@@ -520,7 +592,8 @@ class XiyouApiClient(BaseApiClient):
             price=first_non_empty(product.get("price", ""), find_value(detail, PRICE_KEYS)),
             coupon_value=product.get("coupon_value", ""), deal_price=product.get("deal_price", ""),
             prime_price=product.get("prime_discount_price", ""),
-            sales=find_value(orders, SALES_KEYS | {"orders", "orderCount"}), product_rank=rank,
+            sales=first_non_empty(self._current_month_sales(orders), find_value(orders, SALES_KEYS | {"orders", "orderCount"})),
+            product_rank=rank, small_category_rank=small_rank,
             rating=first_non_empty(product.get("rating", ""), find_value(detail, RATING_KEYS | {"stars"})),
             review_count=first_non_empty(product.get("review_count", ""), find_value(detail, REVIEW_KEYS | {"ratings"})),
             product_url=find_value(detail, {"amazonUrl", "url", "productUrl"}),
@@ -607,6 +680,7 @@ class GenericMcpClient(SorftimeMcpClient):
         args: dict[str, Any] = {}
         end_date = datetime.now(timezone.utc).date()
         start_date = end_date - timedelta(days=30)
+        current_month = end_date.strftime("%Y-%m")
         for name, prop in properties.items():
             raw_name = str(name)
             key = re.sub(r"[^a-z0-9]", "", raw_name.lower())
@@ -639,6 +713,10 @@ class GenericMcpClient(SorftimeMcpClient):
                 args[name] = start_date.isoformat()
             elif key in {"enddate", "todate", "finishdate", "endtime"} or compact_cn in {"结束日期", "截止日期"}:
                 args[name] = end_date.isoformat()
+            elif key in {"startmonth", "frommonth", "beginmonth"} or compact_cn in {"开始月份", "起始月份"}:
+                args[name] = current_month
+            elif key in {"endmonth", "tomonth", "finishmonth", "month"} or compact_cn in {"结束月份", "月份"}:
+                args[name] = current_month
             elif key in {"period", "daterange", "timerange"} or compact_cn in {"周期", "时间范围"}:
                 args[name] = enum_values[0] if isinstance(enum_values, list) and enum_values else "last30days"
             elif prop_type == "boolean" and key in {"exact", "exactflag", "matchexact"}:
@@ -710,6 +788,7 @@ class GenericMcpClient(SorftimeMcpClient):
             deal_price=product.get("deal_price", ""), prime_price=product.get("prime_discount_price", ""),
             sales=first_non_empty(product.get("estimated_sales", ""), find_value(data["sales"], SALES_KEYS | VALUE_KEYS)),
             product_rank=first_non_empty(product.get("product_rank", ""), find_value(data["ranking"], RANK_KEYS)),
+            small_category_rank=product.get("small_category_rank", ""),
             rating=product.get("rating", ""), review_count=product.get("review_count", ""),
             product_url=find_value(data["product"], {"url", "productUrl", "amazonUrl"}),
         )
@@ -743,8 +822,8 @@ class XiyouMcpClient(GenericMcpClient):
             "get_asin_info_trends",
         ),
         "ranking": (
-            "get_asin_keyword_rank_hourly",
             "get_asin_keyword_rank_trends",
+            "get_asin_keyword_rank_hourly",
         ),
         "sales": (
             "get_asin_order_trends",
@@ -815,6 +894,65 @@ class XiyouMcpClient(GenericMcpClient):
         self._generic_cache[key] = parsed
         return parsed
 
+    def _call_rank_variant(self, asin: str, keyword: str, site: str, variant: str) -> Any:
+        """Call get_asin_keyword_rank_trends for a specific organic/ad type.
+
+        Some Xiyou schemas expose one rank type per request.  The generic argument
+        builder naturally chooses the first enum (usually organic), so an explicit
+        second call is required to obtain sponsored/ad position data.
+        """
+        tool = self._select_tool("ranking")
+        if not tool:
+            return {}
+        schema = tool.get("inputSchema") or tool.get("input_schema") or {}
+        properties = schema.get("properties") if isinstance(schema, dict) else {}
+        properties = properties if isinstance(properties, dict) else {}
+        target_name = ""
+        target_value: Any = None
+        organic_tokens = {"0", "or", "organic", "natural"}
+        ad_tokens = {"2", "sp", "ad", "sponsored"}
+        desired = ad_tokens if variant == "ad" else organic_tokens
+        for name, prop in properties.items():
+            key = re.sub(r"[^a-z0-9]", "", str(name).lower())
+            if key not in {"positiontype", "positiontypes", "ranktype", "ranktypes", "rankingtype", "placement", "type"}:
+                continue
+            enum_values = prop.get("enum") if isinstance(prop, dict) else None
+            candidates = enum_values if isinstance(enum_values, list) else [0, 2, "or", "sp", "organic", "ad"]
+            for candidate in candidates:
+                if str(candidate).strip().lower() in desired:
+                    target_name = str(name)
+                    target_value = candidate
+                    if isinstance(prop, dict) and prop.get("type") == "array":
+                        target_value = [candidate]
+                    break
+            if target_name:
+                break
+        if not target_name:
+            return {}
+        cache_kind = f"xiyou_ranking_{variant}"
+        cache_key = (cache_kind, asin, keyword.casefold(), site)
+        if cache_key in self._generic_cache:
+            return self._generic_cache[cache_key]
+        args = self._schema_arguments(tool, asin, keyword, site)
+        args[target_name] = target_value
+        name = str(tool.get("name"))
+        started = time.perf_counter()
+        response = self._post({"jsonrpc": "2.0", "id": int(time.time() * 1000), "method": "tools/call", "params": {"name": name, "arguments": args}})
+        elapsed = time.perf_counter() - started
+        with self._lock:
+            self._mcp_calls += 1
+            self._tool_calls[name] += 1
+            self._tool_seconds[name] += elapsed
+        if "error" in response:
+            error = response.get("error") or {}
+            raise RuntimeError(str(error.get("message") or error.get("data") or f"{name} 调用失败"))
+        result = response.get("result", {})
+        if isinstance(result, dict) and result.get("isError"):
+            raise RuntimeError(str(parse_tool_result(result)))
+        parsed = parse_tool_result(result)
+        self._generic_cache[cache_key] = parsed
+        return parsed
+
     @staticmethod
     def _traffic_share(payload: Any, keyword: str) -> Any:
         row = find_keyword_row(payload, keyword) or payload
@@ -828,6 +966,47 @@ class XiyouMcpClient(GenericMcpClient):
                 if isinstance(rate, dict):
                     value = first_non_empty(rate.get("total"), rate.get("all"), value)
         return _percent_value(value)
+
+    @staticmethod
+    def _rank_positions(payload: Any, keyword: str) -> tuple[Any, Any, Any, Any]:
+        """Extract organic/ad positions from get_asin_keyword_rank_trends."""
+        rows = collect_dict_rows(payload)
+        target = normalize_keyword(keyword)
+        matched = [row for row in rows if not row_keyword(row) or normalize_keyword(row_keyword(row)) == target]
+        candidates = matched or rows
+        candidates.sort(key=lambda row: str(find_value(row, {"date", "day", "time", "recordDate", "statDate"}) or ""), reverse=True)
+        organic = ad = organic_time = ad_time = ""
+        for row in candidates:
+            row_date = find_value(row, {"date", "day", "time", "recordDate", "statDate"})
+            direct_org = find_value(row, ORGANIC_POSITION_KEYS)
+            direct_ad = find_value(row, AD_POSITION_KEYS)
+            if direct_org not in EMPTY and organic in EMPTY:
+                organic, organic_time = direct_org, row_date
+            if direct_ad not in EMPTY and ad in EMPTY:
+                ad, ad_time = direct_ad, row_date
+
+            nested = row.get("ranks") if isinstance(row, dict) else None
+            rank_rows = nested if isinstance(nested, list) else [row]
+            for item in rank_rows:
+                if not isinstance(item, dict):
+                    continue
+                kind = str(first_non_empty(
+                    item.get("position"), item.get("positionType"), item.get("rankType"),
+                    item.get("type"), item.get("placement"), item.get("source"),
+                )).strip().lower()
+                value = first_non_empty(
+                    item.get("totalRank"), item.get("rank"), item.get("positionRank"),
+                    item.get("value"), item.get("index"),
+                )
+                if value in EMPTY:
+                    continue
+                if kind in {"0", "or", "organic", "natural", "自然", "自然位"} and organic in EMPTY:
+                    organic, organic_time = value, first_non_empty(row_date, item.get("date"), item.get("time"))
+                elif kind in {"2", "sp", "ad", "sponsored", "广告", "广告位"} and ad in EMPTY:
+                    ad, ad_time = value, first_non_empty(row_date, item.get("date"), item.get("time"))
+            if organic not in EMPTY and ad not in EMPTY:
+                break
+        return organic, ad, organic_time, ad_time
 
     def capture_keyword(self, asin: str, keyword: str, marketplace: str) -> dict[str, Any]:
         self._ensure_initialized()
@@ -849,20 +1028,33 @@ class XiyouMcpClient(GenericMcpClient):
         keyword_row = find_keyword_row(data["keyword"], keyword) or data["keyword"]
         product = parse_product_detail(data["product"])
         positions = XiyouApiClient._positions(traffic_row if isinstance(traffic_row, dict) else {})
+        rank_org, rank_ad, rank_org_time, rank_ad_time = self._rank_positions(data["ranking"], keyword)
+        if rank_ad in EMPTY:
+            try:
+                ad_ranking = self._call_rank_variant(asin, keyword, site, "ad")
+                raw["ranking_ad"] = ad_ranking
+                _, rank_ad, _, rank_ad_time = self._rank_positions(ad_ranking, keyword)
+                if rank_ad in EMPTY:
+                    rank_ad = find_value(ad_ranking, AD_POSITION_KEYS | POSITION_KEYS | RANK_KEYS)
+            except Exception as exc:
+                raw["ranking_ad_error"] = str(exc)
         organic = first_non_empty(
             positions[0],
+            rank_org,
             find_value(traffic_row, ORGANIC_POSITION_KEYS),
             find_value(data["ranking"], ORGANIC_POSITION_KEYS | POSITION_KEYS | RANK_KEYS),
         )
-        ad = first_non_empty(positions[1], find_value(traffic_row, AD_POSITION_KEYS))
+        ad = first_non_empty(rank_ad, positions[1], find_value(traffic_row, AD_POSITION_KEYS), find_value(data["ranking"], AD_POSITION_KEYS))
+        bsr_main, bsr_small = XiyouApiClient._latest_bsr_ranks(data["bsr"])
         product_rank = first_non_empty(
             product.get("product_rank", ""),
-            XiyouApiClient._latest_root_bsr(data["bsr"]),
+            bsr_main,
             find_value(data["bsr"], RANK_KEYS),
         )
+        small_rank = first_non_empty(product.get("small_category_rank", ""), bsr_small)
         sales = first_non_empty(
+            XiyouApiClient._current_month_sales(data["sales"]),
             product.get("estimated_sales", ""),
-            find_value(data["sales"], SALES_KEYS | {"orders", "orderCount", "orderVolume"} | VALUE_KEYS),
         )
         aba_container = keyword_row.get("abaReport") if isinstance(keyword_row, dict) else None
         return _finish_result(
@@ -872,12 +1064,15 @@ class XiyouMcpClient(GenericMcpClient):
             search_volume=find_value(keyword_row, SEARCH_VOLUME_KEYS | {"weeklySearchVolume"}),
             organic_position=organic,
             ad_position=ad,
+            organic_time=rank_org_time,
+            ad_time=rank_ad_time,
             price=first_non_empty(product.get("price", ""), find_value(data["product"], PRICE_KEYS)),
             coupon_value=product.get("coupon_value", ""),
             deal_price=product.get("deal_price", ""),
             prime_price=product.get("prime_discount_price", ""),
             sales=sales,
             product_rank=product_rank,
+            small_category_rank=small_rank,
             rating=first_non_empty(product.get("rating", ""), find_value(data["product"], RATING_KEYS)),
             review_count=first_non_empty(product.get("review_count", ""), find_value(data["product"], REVIEW_KEYS)),
             product_url=find_value(data["product"], {"url", "productUrl", "amazonUrl"}),
@@ -926,7 +1121,7 @@ class GenericApiClient(BaseApiClient):
             ad_position=find_value(keyword_row, AD_POSITION_KEYS), price=product.get("price", ""),
             coupon_value=product.get("coupon_value", ""), deal_price=product.get("deal_price", ""),
             prime_price=product.get("prime_discount_price", ""), sales=product.get("estimated_sales", ""),
-            product_rank=product.get("product_rank", ""), rating=product.get("rating", ""),
+            product_rank=product.get("product_rank", ""), small_category_rank=product.get("small_category_rank", ""), rating=product.get("rating", ""),
             review_count=product.get("review_count", ""), product_url=find_value(data, {"url", "productUrl", "amazonUrl"}),
         )
 

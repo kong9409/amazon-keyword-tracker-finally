@@ -1,6 +1,15 @@
-# Amazon 关键词监控工具 by kong · V6.1 西柚洞察 MCP 版
+# Amazon 关键词监控工具 by kong · V7 字段前置匹配版
 
-部署在 Zeabur 的 Amazon 关键词监控工具。用户先选择数据源，再输入自己的 MCP / CLI / API 凭证、ASIN 和关键词，结果可下载 Excel、写入飞书，或同时输出。
+部署在 Zeabur 的 Amazon 关键词监控工具。页面先展示固定监控字段，再选择 Sorftime、卖家精灵、SIF、西柚洞察或其他 MCP/API；工具会基于《各插件 MCP 目录表》匹配所需接口，随后输入凭证、ASIN 和关键词抓取数据。
+
+## V7 核心变化
+
+- **监控字段前置**：STEP 1 先展示全部 18 个输出字段，选择数据源后立即显示该软件对应的接口、覆盖状态和输出格式。
+- **新增小类排名**：位于“大类排名”之后，页面、Excel、飞书和数据库全部同步增加。
+- **流量占比统一格式**：页面和飞书显示为百分比并保留 2 位小数，例如 `12.50%`；Excel 使用真实百分比数值和 `0.00%` 格式。
+- **西柚广告位**：优先使用 `get_asin_keyword_rank_trends` 的广告排名结果。
+- **西柚月销量**：使用 `get_asin_order_trends`，只取当前自然月的销量/订单值。
+- **西柚类目排名**：`get_asin_bsr_trends` 中根类目作为大类排名，最深非根类目作为小类排名。
 
 ## 支持的数据源
 
@@ -12,61 +21,56 @@
 | 西柚洞察 | MCP（默认）/ OpenAPI V2 | MCP URL + Token，或 API Key |
 | 其他软件 | 自定义 MCP / API | MCP URL + Token，或 API Endpoint + Key/Header |
 
-选择不同软件时，页面只显示该软件的连接输入框。原来的“CLI / MCP”已明确改名为 **Sorftime CLI / Sorftime MCP**。
+选择不同软件时，页面只显示该软件的连接输入框。原来的“CLI / MCP”已明确显示为 **Sorftime CLI / Sorftime MCP**。
 
 ## 使用步骤
 
-1. 在 STEP 1 选择数据源。
-2. 填写该数据源的 MCP、CLI 或 API 凭证并测试连接。
-3. 输入 ASIN 和关键词；关键词示例仅使用 `关键词1`、`关键词2`、`关键词3`。
-4. 选择 Amazon 站点。
-5. 选择下载 Excel、写入飞书，或两者同时执行。
+1. STEP 1 查看固定监控字段以及当前数据源的接口匹配结果。
+2. STEP 2 选择数据源和连接方式，填写 MCP、CLI 或 API 凭证并测试连接。
+3. STEP 3 输入 ASIN。
+4. STEP 4 输入关键词；示例仅使用 `关键词1`、`关键词2`、`关键词3`。
+5. STEP 5 选择 Amazon 站点以及 Excel、飞书或 Excel + 飞书输出。
 6. 保持“每日 09:00 自动抓取（北京时间）”勾选，可保存当前数据源和任务配置。
 7. 点击“开始抓取”。
 
-## 各数据源字段组合
+## 18 个监控字段
+
+日期、ASIN、关键词、流量占比、ABA热度、搜索量、自然位、广告位、价格、优惠券、秒杀价、Prime价、月销量、大类排名、**小类排名**、评分、评价数、链接。
+
+## 主要接口匹配
 
 ### Sorftime
 
-保留现有严格指标映射：
-
 - 流量占比：`product_traffic_terms`
 - ABA热度、搜索量：`keyword_detail`
-- 自然位、广告位：`keyword_search_results`，自然位再用关键词排名趋势兜底
-- 价格、优惠券、秒杀价、Prime价、月销量、大类排名、评分、评价数：`product_detail`，月销量/排名按 `product_trend` 兜底
+- 自然位、广告位：`keyword_search_results`
+- 价格、优惠券、秒杀价、Prime价、月销量、大类排名、小类排名、评分、评价数：`product_detail`
+- 月销量、大类排名缺失时：`product_trend`
 
 ### 卖家精灵 API
 
-- 反查流量词：`/v1/traffic/keyword`
-- ABA与搜索量：`/v1/aba/research`
-- 产品详情：`/v1/asin/{marketplace}/{asin}`
-- 月销量兜底：`/v1/product/competitor-lookup`
+- 反查流量词：`traffic_keyword`
+- ABA与搜索量：`keyword_research` / ABA 接口
+- 产品详情和类目排名：`asin_detail` / `keepa_info`
+- 月销量：`competitor_lookup` / `asin_sales_trend`
 
 ### SIF MCP
 
-程序调用 `tools/list`，按工具名称、描述和实时 `inputSchema` 自动识别：流量词、关键词详情、产品详情、排名和销量工具。SIF 后续修改命名空间时，无需在页面重新填写接口名。
+上传的《各插件 MCP 目录表》中 SIF 工作表暂无具体工具目录，因此 V7 使用 `tools/list`、工具描述和实时 `inputSchema` 动态匹配流量、ABA、排名、产品详情、销量及类目排名工具；页面会标记为“动态匹配”。
 
-### 西柚洞察 MCP / OpenAPI V2
+### 西柚洞察 MCP / OpenAPI
 
-MCP 为页面默认方式：
-
-- MCP URL：`https://mcp.xydc.com/mcp`
-- 鉴权：`Authorization: Bearer <MCP Token>`
-- 程序通过 `initialize → tools/list → tools/call` 连接，并优先识别西柚的 ASIN 关键词、关键词详情、ASIN详情、关键词排名、订单趋势和 BSR 趋势工具。
-- 工具名称变化时，继续使用实时 `tools/list` 和 `inputSchema` 动态匹配。
-
-OpenAPI V2 仍可在页面切换使用：
-
-- 反查关键词与流量占比：`/v1/asins/research/list/period`
-- ABA与搜索量：`/v1/searchTerms/info`
-- 产品详情：`/v1/asins/info`
-- 30日订单/月销量：`/v1/asins/orders`
-- BSR趋势：`/v1/asins/bsrInfo/trends/daily`
+- 流量占比：`get_asin_keyword_traffic_trends`，缺失时再用 `get_asin_keywords`
+- ABA热度、搜索量：`get_keyword_info` / `get_keyword_aba_trends`
+- 自然位、广告位：`get_asin_keyword_rank_trends`
+- 价格、优惠券、活动价、评分、评价数：`get_asin_info`
+- 月销量：`get_asin_order_trends`，取当前自然月
+- 大类排名、小类排名：`get_asin_bsr_trends`
 
 ### 其他软件
 
-- 自定义 MCP：读取 `tools/list` 并动态匹配 Amazon ASIN/关键词工具。
-- 自定义 API：对 Endpoint 发送 JSON POST：
+- 自定义 MCP：读取 `tools/list` 和实时 schema，按字段语义动态匹配。
+- 自定义 API：向 Endpoint 发送 JSON POST：
 
 ```json
 {
@@ -76,29 +80,24 @@ OpenAPI V2 仍可在页面切换使用：
 }
 ```
 
-返回字段可使用常见英文或中文名称，例如 `trafficShare`、`searchFrequencyRank`、`searchVolume`、`organicPosition`、`price`、`monthlySales`、`bsrRank`、`rating`、`reviewCount`。
-
 ## 飞书与 Excel
 
 - 飞书输入：App ID、App Secret、Base 链接。
-- 支持读取目标字段类型并转换，避免 `TextFieldConvFail`。
-- 支持 Excel、飞书、Excel + 飞书三种输出方式。
+- 支持读取真实字段类型并转换，避免 `TextFieldConvFail`。
+- Excel、飞书、Excel + 飞书三种输出方式。
+- Excel 中“流量占比”使用真实百分比格式 `0.00%`。
 - Excel“任务汇总”页显示数据接口总调用次数、各接口次数和耗时。
 
 ## 每日 09:00 自动抓取
 
 - 固定北京时间 `Asia/Shanghai` 09:00。
-- 会保存当前 ASIN、关键词、站点、数据源、输出方式与飞书配置。
-- MCP/API/CLI 与飞书凭证会加密保存，不写入普通任务 JSON。
-- Zeabur 必须挂载持久化卷：
-
-```text
-/app/data
-```
+- 保存 ASIN、关键词、站点、数据源、输出方式与飞书配置。
+- MCP/API/CLI 与飞书凭证加密保存，不写入普通任务 JSON。
+- Zeabur 必须挂载持久化卷：`/app/data`。
 
 ## Zeabur 部署
 
-将项目文件直接覆盖 GitHub 仓库根目录，确认至少存在：
+把项目文件直接覆盖 GitHub 仓库根目录，确认至少存在：
 
 ```text
 Dockerfile
@@ -124,4 +123,4 @@ node --check static/app.js
 python -m py_compile app.py provider_adapter.py sorftime_adapter.py lark_writer.py
 ```
 
-V6.1 使用模拟响应测试不同软件的字段解析、请求参数、客户端分发、凭证脱敏，以及西柚洞察 MCP 工具优先匹配；未把任何真实 Token 写入项目文件。
+V7 已使用模拟响应测试字段前置匹配、百分比格式、小类排名、西柚广告位和当前月销量逻辑；未使用付费账号进行真实线上调用，各软件最终覆盖度仍取决于账号套餐和接口实际返回。

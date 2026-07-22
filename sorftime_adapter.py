@@ -170,6 +170,7 @@ class SorftimeMcpClient:
         prime_price = product.get("prime_discount_price", "")
         sales = product.get("estimated_sales", "")
         rank = product.get("product_rank", "")
+        small_rank = product.get("small_category_rank", "")
         rating = product.get("rating", "")
         reviews = product.get("review_count", "")
 
@@ -189,7 +190,7 @@ class SorftimeMcpClient:
         keyword_rank = first_non_empty(organic_position, ad_position)
         values = (
             traffic_share, aba_rank, search_volume, organic_position, ad_position,
-            price, coupon_value, deal_price, prime_price, sales, rank, rating, reviews,
+            price, coupon_value, deal_price, prime_price, sales, rank, small_rank, rating, reviews,
         )
         found_any = any(value not in EMPTY for value in values)
 
@@ -236,6 +237,7 @@ class SorftimeMcpClient:
             "prime_discount_price": normalize_money(prime_price),
             "estimated_sales": normalize_number(sales),
             "product_rank": normalize_number(rank),
+            "small_category_rank": normalize_number(small_rank),
             "rating": normalize_decimal(rating),
             "review_count": normalize_number(reviews),
             "product_url": amazon_product_url(asin, site),
@@ -723,6 +725,7 @@ class SorftimeCliClient:
             "prime_discount_price": normalize_money(product.get("prime_discount_price", "")),
             "estimated_sales": normalize_number(product.get("estimated_sales", "")),
             "product_rank": normalize_number(product.get("product_rank", "")),
+            "small_category_rank": normalize_number(product.get("small_category_rank", "")),
             "rating": normalize_decimal(product.get("rating", "")),
             "review_count": normalize_number(product.get("review_count", "")),
             "product_url": amazon_product_url(asin, site),
@@ -1361,7 +1364,62 @@ def scalar_rank(value: Any) -> Any:
     return value
 
 
+def extract_category_ranks(detail: Any) -> tuple[Any, Any]:
+    """Extract root-category and leaf/sub-category BSR values.
+
+    Product providers represent category ranks in several ways: dedicated root/
+    subcategory fields, arrays of category objects, or a generic ``rank`` field
+    accompanied by category metadata.  The helper deliberately prefers explicit
+    fields, then category rows marked as root/main or leaf/subcategory.
+    """
+    main_rank = find_value(detail, MAIN_RANK_KEYS)
+    small_rank = find_value(detail, SMALL_RANK_KEYS)
+
+    main_candidates: list[tuple[int, Any]] = []
+    small_candidates: list[tuple[int, Any]] = []
+    for row in collect_dict_rows(detail):
+        if not isinstance(row, dict):
+            continue
+        label = str(first_non_empty(
+            find_value(row, {"categoryName", "category", "nodeName", "browseNodeName", "类别", "类目", "rankType", "type"}),
+            "",
+        )).casefold()
+        root_flag = row.get("root") is True or row.get("isRoot") is True or row.get("is_root") is True
+        level_value = find_value(row, {"level", "depth", "categoryLevel", "nodeLevel", "层级"})
+        try:
+            level = int(float(str(level_value))) if level_value not in EMPTY else 0
+        except (TypeError, ValueError):
+            level = 0
+
+        explicit_main = find_value(row, MAIN_RANK_KEYS)
+        explicit_small = find_value(row, SMALL_RANK_KEYS)
+        generic_rank = find_value(row, {"rank", "ranking", "bsr", "BSR", "value", "position"})
+
+        if explicit_main not in EMPTY:
+            main_candidates.append((level, explicit_main))
+        if explicit_small not in EMPTY:
+            small_candidates.append((level, explicit_small))
+
+        has_category_context = bool(label) or root_flag or any(
+            key in row for key in ("categoryId", "nodeId", "browseNodeId", "categoryTree")
+        )
+        if generic_rank not in EMPTY and has_category_context:
+            if root_flag or any(token in label for token in ("root", "main", "大类", "一级", "根类目")):
+                main_candidates.append((level, generic_rank))
+            elif any(token in label for token in ("sub", "leaf", "small", "小类", "子类", "细分类")) or level > 0:
+                small_candidates.append((level, generic_rank))
+
+    if main_rank in EMPTY and main_candidates:
+        main_candidates.sort(key=lambda item: item[0])
+        main_rank = main_candidates[0][1]
+    if small_rank in EMPTY and small_candidates:
+        small_candidates.sort(key=lambda item: item[0], reverse=True)
+        small_rank = small_candidates[0][1]
+    return scalar_rank(main_rank), scalar_rank(small_rank)
+
+
 def parse_product_detail(detail: Any) -> dict[str, Any]:
+    main_rank, small_rank = extract_category_ranks(detail)
     direct = {
         "price": find_value(detail, PRICE_KEYS),
         "coupon_value": find_value(detail, COUPON_KEYS),
@@ -1369,7 +1427,8 @@ def parse_product_detail(detail: Any) -> dict[str, Any]:
         "deal_price": find_value(detail, DEAL_PRICE_KEYS),
         "prime_discount_price": find_value(detail, PRIME_PRICE_KEYS),
         "estimated_sales": find_value(detail, SALES_KEYS),
-        "product_rank": find_value(detail, RANK_KEYS),
+        "product_rank": main_rank,
+        "small_category_rank": small_rank,
         "rating": find_value(detail, RATING_KEYS),
         "review_count": find_value(detail, REVIEW_KEYS),
     }
@@ -1380,10 +1439,15 @@ def parse_product_detail(detail: Any) -> dict[str, Any]:
     direct["prime_discount_price"] = first_non_empty(direct["prime_discount_price"], regex_value(text, r"Prime(?:专享价|价格|折扣价)?[:：]\s*[\$€£￥¥]?\s*([0-9,.]+)"))
     direct["estimated_sales"] = first_non_empty(direct["estimated_sales"], regex_value(text, r"(?:月销量|monthlySales|ListingSalesVolumeOfMonth)[:：]\s*([0-9,.]+)"))
     direct["product_rank"] = first_non_empty(direct["product_rank"], regex_value(text, r"(?:大类排名|BSR|SalesRank|productRank)[:：#\s]*([0-9,.]+)"))
+    direct["small_category_rank"] = first_non_empty(
+        direct["small_category_rank"],
+        regex_value(text, r"(?:小类排名|子类排名|SubcategoryRank|SmallCategoryRank)[:：#\s]*([0-9,.]+)"),
+    )
     direct["rating"] = first_non_empty(direct["rating"], regex_value(text, r"(?:星级|rating|Rating)[:：]\s*([0-9.]+)"))
     direct["review_count"] = first_non_empty(direct["review_count"], regex_value(text, r"(?:评论数|评价数量|reviewCount|ratingCount)[:：]\s*([0-9,.]+)"))
     direct["estimated_sales"] = scalar_metric(direct["estimated_sales"], SALES_KEYS)
     direct["product_rank"] = scalar_rank(direct["product_rank"])
+    direct["small_category_rank"] = scalar_rank(direct["small_category_rank"])
     direct["coupon_type"] = classify_coupon(direct["coupon_value"])
     direct["deal_status"] = normalize_yes_no(direct["deal_status"], bool(direct["deal_price"]))
     return direct
@@ -1511,7 +1575,13 @@ def normalize_percent(value: Any) -> Any:
     number = normalize_number(text)
     if number == "":
         return value
-    return f"{number}%" if "%" in text else number
+    try:
+        numeric = float(number)
+    except (TypeError, ValueError):
+        return value
+    if "%" not in text and -1 <= numeric <= 1:
+        numeric *= 100
+    return f"{numeric:.2f}%"
 
 
 def normalize_position(value: Any) -> Any:
@@ -1705,9 +1775,22 @@ SALES_KEYS = {
     "ASINMonthSalesVolume", "asinMonthSalesVolume", "monthlyUnitsSold", "unitsSoldLastMonth",
     "EstimatedMonthlySales", "estimatedMonthlySales", "salesVolume30Days", "SalesVolume30Days",
 }
-RANK_KEYS = {
+SMALL_RANK_KEYS = {
+    "小类排名", "子类排名", "细分类排名", "smallCategoryRank", "SmallCategoryRank",
+    "subCategoryRank", "SubCategoryRank", "subcategoryRank", "SubcategoryRank",
+    "subcategorySalesVolumeRank", "childCategoryRank", "leafCategoryRank",
+    "browseNodeRank", "smallBsrRank", "subBsrRank", "minorCategoryRank",
+}
+MAIN_RANK_KEYS = {
+    "产品排名", "大类排名", "mainCategoryRank", "MainCategoryRank",
+    "rootCategoryRank", "RootCategoryRank", "bigCategoryRank", "BigCategoryRank",
+    "parentCategoryRank", "categoryBsrRank", "SalesRankOfCategory",
+    "salesRankOfCategory", "AmazonBestSellerRank", "amazonBestSellerRank",
+    "bestSellerRank", "BestSellerRank", "SalesRank", "salesRank", "BSR", "bsr", "bsrRank", "BsrRank",
+}
+RANK_KEYS = MAIN_RANK_KEYS | SMALL_RANK_KEYS | {
     "产品排名", "大类排名", "rank", "bsr", "BSR", "productRank", "categoryRank",
-    "subcategorySalesVolumeRank", "bestSellerRank", "CategoryRank", "SalesRank",
+    "bestSellerRank", "CategoryRank", "SalesRank",
     "BestSellerRank", "parentCategoryRank",
     "bigCategoryRank", "BigCategoryRank", "rankingOfCategory", "categoryBsrRank", "bsrRank", "BsrRank",
     "MainCategoryRank", "mainCategoryRank", "RootCategoryRank", "rootCategoryRank",
