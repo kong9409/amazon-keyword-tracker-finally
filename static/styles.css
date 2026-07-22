@@ -182,3 +182,17 @@ tbody tr:hover { background: #eaf8f7; }
   .field-count, .coverage-badge { align-self: flex-start; }
   .required-field-grid, .field-match-grid { grid-template-columns: 1fr 1fr; }
 }
+
+.fixed-endpoint-card { justify-content: center; }
+.fixed-endpoint {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border: 1px solid var(--border, #d8e1e8);
+  border-radius: 10px;
+  background: #f6f9fb;
+  color: #0e526a;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}

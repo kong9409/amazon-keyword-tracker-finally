@@ -52,6 +52,8 @@ from sorftime_adapter import (
 )
 
 
+SELLERSPRITE_MCP_URL = "https://mcp.sellersprite.com/mcp"
+
 PROVIDER_LABELS = {
     "sorftime": "Sorftime",
     "sellersprite": "卖家精灵",
@@ -710,10 +712,16 @@ class SellerSpriteMcpClient(GenericMcpClient):
         "sales": ("competitor_lookup", "asin_sales_trend", "asin_prediction"),
     }
 
-    def __init__(self, url: str, token: str) -> None:
-        if not str(url or "").strip():
-            raise ValueError("请填写卖家精灵 MCP URL")
-        super().__init__(str(url).strip(), str(token or "").strip(), provider_name="卖家精灵", source_name="sellersprite_mcp")
+    def __init__(self, url: str = SELLERSPRITE_MCP_URL, token: str = "") -> None:
+        # Endpoint is deliberately fixed to the official SellerSprite MCP server.
+        # Ignore any client-supplied URL so deployments cannot accidentally point
+        # credentials at an untrusted endpoint.
+        super().__init__(SELLERSPRITE_MCP_URL, str(token or "").strip(), provider_name="卖家精灵", source_name="sellersprite_mcp")
+
+    def _auth_headers(self) -> dict[str, str]:
+        if not self.token:
+            return {}
+        return {"secret-key": self.token}
 
     def _select_tool(self, kind: str) -> dict[str, Any] | None:
         preferred = self.PREFERRED_TOOLS.get(kind, ())
@@ -1110,7 +1118,7 @@ def build_data_client(connection: dict[str, Any] | None = None) -> DataClient:
     if provider == "sorftime":
         return build_sorftime_client(connection)
     if provider == "sellersprite":
-        return SellerSpriteMcpClient(str(connection.get("mcp_url") or ""), str(connection.get("mcp_token") or ""))
+        return SellerSpriteMcpClient(token=str(connection.get("mcp_token") or ""))
     if provider == "xiyou":
         if mode == "mcp_url":
             return XiyouMcpClient(

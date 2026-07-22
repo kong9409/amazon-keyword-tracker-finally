@@ -91,15 +91,15 @@
           </div>
 
           <div class="provider-fields span-three" id="sellerSpriteFields" hidden>
+            <div class="control setting-card flex-two fixed-endpoint-card">
+              <span>卖家精灵 MCP 服务</span>
+              <strong class="fixed-endpoint">https://mcp.sellersprite.com/mcp</strong>
+              <small>官方 MCP URL 已内置，无需手动填写；后台使用固定请求头 <code>secret-key</code> 鉴权。</small>
+            </div>
             <label class="control setting-card flex-two">
-              <span>卖家精灵 MCP URL</span>
-              <input name="sellersprite_mcp_url" id="sellerSpriteMcpUrl" autocomplete="off" placeholder="粘贴卖家精灵 MCP URL" />
-              <small>使用卖家精灵提供的远程 MCP 地址；不再使用开放 API Base URL。</small>
-            </label>
-            <label class="control setting-card flex-two">
-              <span>卖家精灵 MCP Token / Key</span>
-              <input name="sellersprite_mcp_token" id="sellerSpriteMcpToken" type="password" autocomplete="off" placeholder="粘贴卖家精灵 MCP Token / Key" />
-              <small>工具会读取 tools/list，并基于 MCP 目录表匹配流量词、ABA、详情和销量工具。</small>
+              <span>卖家精灵 MCP Key</span>
+              <input name="sellersprite_mcp_token" id="sellerSpriteMcpToken" type="password" autocomplete="off" placeholder="粘贴卖家精灵 MCP Key" />
+              <small>仅填写“卖家精灵数据开放平台 → 我的密钥”中创建的密钥。</small>
             </label>
           </div>
 

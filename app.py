@@ -36,6 +36,7 @@ STATIC_DIR = BASE_DIR / "static"
 # One web application for Zeabur or local use. Zeabur injects PORT automatically.
 APP_MODE = (os.getenv("APP_MODE") or ("hosted" if os.getenv("PORT") else "local")).strip().lower()
 HOSTED_MODE = APP_MODE in {"hosted", "zeabur", "cloud"}
+SELLERSPRITE_MCP_URL = "https://mcp.sellersprite.com/mcp"
 APP_HOST = os.getenv("HOST") or ("0.0.0.0" if HOSTED_MODE else "127.0.0.1")
 APP_PORT = int(os.getenv("PORT") or os.getenv("KEYWORD_TRACKER_PORT", "8766"))
 DEFAULT_TIMEZONE = os.getenv("APP_TIMEZONE", "Asia/Shanghai")
@@ -224,14 +225,19 @@ def normalize_connection(value: dict[str, Any] | None) -> dict[str, Any]:
         "xiyou": "https://openapi.xydc.com",
     }
     mcp_defaults = {
-        "sellersprite": "",
+        "sellersprite": SELLERSPRITE_MCP_URL,
         "sif": "https://mcp.sif.com/mcp",
         "xiyou": "https://mcp.xydc.com/mcp",
     }
+    normalized_mcp_url = (
+        SELLERSPRITE_MCP_URL
+        if provider == "sellersprite"
+        else str(value.get("mcp_url", mcp_defaults.get(provider, "")) or mcp_defaults.get(provider, "")).strip()
+    )
     return {
         "provider": provider,
         "mode": mode,
-        "mcp_url": str(value.get("mcp_url", mcp_defaults.get(provider, "")) or mcp_defaults.get(provider, "")).strip(),
+        "mcp_url": normalized_mcp_url,
         "mcp_token": str(value.get("mcp_token", "") or "").strip(),
         "cli_account_sk": str(value.get("cli_account_sk", "") or "").strip(),
         "cli_command": str(value.get("cli_command", "") or "").strip(),
@@ -252,7 +258,7 @@ def connection_has_value(connection: dict[str, Any]) -> bool:
             return bool(connection.get("cli_account_sk"))
         return bool(connection.get("cli_command"))
     if provider == "sellersprite":
-        return bool(connection.get("mcp_url"))
+        return bool(connection.get("mcp_token"))
     if provider == "xiyou":
         return bool(connection.get("mcp_url") and connection.get("mcp_token")) if mode == "mcp_url" else bool(connection.get("api_key"))
     if provider == "sif":
@@ -620,7 +626,7 @@ def connection_from_form(form: SimpleForm) -> dict[str, Any]:
     if provider == "sellersprite":
         return normalize_connection({
             "provider": provider, "mode": "mcp_url",
-            "mcp_url": form.getfirst("sellersprite_mcp_url"),
+            "mcp_url": SELLERSPRITE_MCP_URL,
             "mcp_token": form.getfirst("sellersprite_mcp_token"),
         })
     if provider == "sif":

@@ -16,7 +16,7 @@
 | 页面选项 | 连接方式 | 页面需要填写 |
 |---|---|---|
 | Sorftime | Sorftime CLI / Sorftime MCP | Account-SK，或 MCP URL + Token |
-| 卖家精灵 | MCP | MCP URL + MCP Token / Key |
+| 卖家精灵 | MCP | 仅填写 MCP Key；官方 URL 已内置 |
 | SIF | MCP | MCP URL + MCP Key |
 | 西柚洞察 | MCP（默认）/ OpenAPI V2 | MCP URL + Token，或 API Key |
 | 其他软件 | 自定义 MCP / API | MCP URL + Token，或 API Endpoint + Key/Header |
@@ -49,13 +49,13 @@
 
 ### 卖家精灵 MCP
 
-- 连接：填写卖家精灵提供的 MCP URL 与 Token / Key。
+- 连接：官方 MCP URL `https://mcp.sellersprite.com/mcp` 已内置，页面只填写 MCP Key。
 - 反查流量词、自然位、广告位：`traffic_keyword`，缺失时尝试 `traffic_keyword_stat`。
 - ABA热度：`aba_research_monthly` → `aba_research_weekly`。
 - 搜索量：`keyword_research` → ABA 工具。
 - 产品详情、优惠和类目排名：`asin_detail_with_coupon_trend` → `asin_detail` → `keepa_info`。
 - 月销量：`competitor_lookup` → `asin_sales_trend`。
-- 后端通过 MCP `initialize`、`tools/list`、`tools/call` 调用，不再走卖家精灵 API。
+- 后端通过 MCP `initialize`、`tools/list`、`tools/call` 调用，并使用官方要求的 `secret-key` 请求头；不再走卖家精灵 API。
 
 ### SIF MCP
 

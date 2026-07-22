@@ -11,7 +11,8 @@
 ## 连接要求
 
 - Sorftime CLI：容器已安装 `sorftime-cli`，用户只输入 Account-SK。
-- Sorftime、卖家精灵、SIF、西柚和其他 MCP：必须填写 Zeabur 可访问的公网 HTTPS MCP URL。
+- Sorftime、SIF、西柚和其他 MCP：必须填写 Zeabur 可访问的公网 HTTPS MCP URL。
+- 卖家精灵：官方 MCP URL 已内置，只填写 MCP Key。
 - 数据源凭证不应配置成全站公共 Zeabur 环境变量。
 
 ## 部署后检查

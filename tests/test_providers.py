@@ -110,13 +110,17 @@ class ProviderTests(unittest.TestCase):
             "mcp_url": "https://mcp.example.com/mcp", "mcp_token": "top-secret",
         })
         self.assertTrue(app.connection_has_value(connection))
+        self.assertEqual(connection["mcp_url"], "https://mcp.sellersprite.com/mcp")
         clean = app.sanitize_payload_for_disk({"connection": connection, "lark": {"feishu_app_secret": "secret"}})
         self.assertEqual(clean["connection"]["provider"], "sellersprite")
         self.assertEqual(clean["connection"]["mcp_token"], "")
         self.assertEqual(clean["lark"]["feishu_app_secret"], "")
 
     def test_build_provider_clients(self):
-        self.assertEqual(build_data_client({"provider": "sellersprite", "mode": "mcp_url", "mcp_url": "https://mcp.example.com/mcp", "mcp_token": "x"}).source_name, "sellersprite_mcp")
+        sellersprite = build_data_client({"provider": "sellersprite", "mode": "mcp_url", "mcp_url": "https://mcp.example.com/mcp", "mcp_token": "x"})
+        self.assertEqual(sellersprite.source_name, "sellersprite_mcp")
+        self.assertEqual(sellersprite.url, "https://mcp.sellersprite.com/mcp")
+        self.assertEqual(sellersprite._auth_headers(), {"secret-key": "x"})
         self.assertEqual(build_data_client({"provider": "xiyou", "mode": "api", "api_key": "x"}).source_name, "xiyou_api")
         self.assertEqual(build_data_client({"provider": "xiyou", "mode": "mcp_url", "mcp_url": "https://mcp.xydc.com/mcp", "mcp_token": "x"}).source_name, "xiyou_mcp")
         self.assertEqual(build_data_client({"provider": "sif", "mode": "mcp_url", "mcp_url": "https://mcp.sif.com/mcp", "mcp_token": "x"}).source_name, "sif_mcp")
@@ -125,7 +129,7 @@ class ProviderTests(unittest.TestCase):
 
 
     def test_sellersprite_mcp_prefers_directory_tool_names(self):
-        client = SellerSpriteMcpClient("https://mcp.example.com/mcp", "token")
+        client = SellerSpriteMcpClient(token="token")
         client._generic_tools = [
             {"name": "traffic_keyword", "description": "关键词反查"},
             {"name": "aba_research_monthly", "description": "ABA按月"},
@@ -200,7 +204,9 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("Sorftime CLI", html)
         self.assertIn("Sorftime MCP", html)
         self.assertIn("卖家精灵（MCP）", html)
-        self.assertIn("卖家精灵 MCP URL", html)
+        self.assertIn("https://mcp.sellersprite.com/mcp", html)
+        self.assertNotIn('name="sellersprite_mcp_url"', html)
+        self.assertIn("卖家精灵 MCP Key", html)
         self.assertIn("西柚洞察 MCP", html)
         self.assertIn("https://mcp.xydc.com/mcp", html)
         self.assertIn("STEP 1 · 监控字段", html)
