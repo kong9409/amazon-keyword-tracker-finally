@@ -10,8 +10,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# CLI 模式由容器内官方 sorftime-cli 执行；网页用户只输入 Account-SK，
-# 不接受也不执行用户提供的任意 Shell 命令。
+# Sorftime CLI 模式由容器内 sorftime-cli 执行；其他数据源通过 HTTPS MCP/API 调用。
+# 网页不接受也不执行用户提供的任意 Shell 命令。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs npm ca-certificates \
     && npm install -g sorftime-cli \

@@ -28,7 +28,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from lark_writer import append_records_to_lark
-from sorftime_adapter import build_sorftime_client, test_sorftime_connection
+from provider_adapter import build_data_client, provider_label, test_data_connection
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -50,7 +50,7 @@ CONNECTION_DIR = DATA_DIR / "local_connections"
 DB_PATH = DATA_DIR / "keyword_tracker.db"
 PID_PATH = DATA_DIR / "app.pid"
 SCHEDULER_KEY_PATH = DATA_DIR / ".scheduler.key"
-HOSTED_MCP_HOSTS = [item.strip().lower() for item in os.getenv("SORFTIME_ALLOWED_MCP_HOSTS", "").split(",") if item.strip()]
+HOSTED_MCP_HOSTS = [item.strip().lower() for item in os.getenv("ALLOWED_DATA_HOSTS", os.getenv("SORFTIME_ALLOWED_MCP_HOSTS", "")).split(",") if item.strip()]
 EXCEL_FONT = "Microsoft YaHei"
 
 # Required operational fields are deliberately first and fully visible in UI/Excel.
@@ -177,21 +177,25 @@ def sanitize_owner_id(value: str) -> str:
     return value if re.fullmatch(r"[A-Za-z0-9_-]{16,100}", value) else ""
 
 
-def validate_hosted_mcp_url(url: str) -> None:
+def validate_hosted_data_url(url: str, label: str = "数据接口") -> None:
     parsed = urlparse(url)
     if parsed.scheme.lower() != "https" or not parsed.hostname:
-        raise ValueError("Zeabur 模式只允许填写可公网访问的 HTTPS Sorftime MCP URL")
+        raise ValueError(f"Zeabur 模式只允许填写可公网访问的 HTTPS {label} URL")
     host = parsed.hostname.lower().rstrip(".")
     if host == "localhost" or host.endswith(".local"):
-        raise ValueError("Zeabur 无法访问你电脑的 localhost；本机 MCP/CLI 请使用本机版")
+        raise ValueError(f"Zeabur 无法访问你电脑的 localhost；请填写公网 HTTPS {label} URL")
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         address = None
     if address and (address.is_private or address.is_loopback or address.is_link_local or address.is_reserved):
-        raise ValueError("Zeabur 模式不能访问本机或内网 MCP 地址；请填写公网 HTTPS MCP URL")
+        raise ValueError(f"Zeabur 模式不能访问本机或内网 {label} 地址")
     if HOSTED_MCP_HOSTS and not any(host == allowed or host.endswith("." + allowed) for allowed in HOSTED_MCP_HOSTS):
-        raise ValueError("该 MCP 域名不在 Zeabur 服务允许列表中")
+        raise ValueError(f"该 {label} 域名不在服务允许列表中")
+
+def validate_hosted_mcp_url(url: str) -> None:
+    """Backward-compatible alias for existing tests and deployments."""
+    validate_hosted_data_url(url, "MCP")
 
 
 def connection_path(owner_id: str) -> Path:
@@ -201,27 +205,60 @@ def connection_path(owner_id: str) -> Path:
 
 def normalize_connection(value: dict[str, Any] | None) -> dict[str, Any]:
     value = value or {}
-    mode = str(value.get("mode", "cli_account") or "cli_account").strip()
-    if mode not in {"cli_account", "mcp_url", "mcp_stdio"}:
-        mode = "cli_account"
+    provider = str(value.get("provider", "sorftime") or "sorftime").strip().lower()
+    if provider not in {"sorftime", "sellersprite", "sif", "xiyou", "custom"}:
+        provider = "sorftime"
+    default_mode = "cli_account" if provider == "sorftime" else ("mcp_url" if provider in {"sif", "xiyou", "custom"} else "api")
+    mode = str(value.get("mode", default_mode) or default_mode).strip().lower()
+    allowed_modes = {
+        "sorftime": {"cli_account", "mcp_url", "mcp_stdio"},
+        "sellersprite": {"api"},
+        "sif": {"mcp_url"},
+        "xiyou": {"mcp_url", "api"},
+        "custom": {"mcp_url", "api"},
+    }
+    if mode not in allowed_modes[provider]:
+        mode = default_mode
+    defaults = {
+        "sellersprite": "https://api.sellersprite.com",
+        "xiyou": "https://openapi.xydc.com",
+    }
+    mcp_defaults = {
+        "sif": "https://mcp.sif.com/mcp",
+        "xiyou": "https://mcp.xydc.com/mcp",
+    }
     return {
+        "provider": provider,
         "mode": mode,
-        "mcp_url": str(value.get("mcp_url", "") or "").strip(),
+        "mcp_url": str(value.get("mcp_url", mcp_defaults.get(provider, "")) or mcp_defaults.get(provider, "")).strip(),
         "mcp_token": str(value.get("mcp_token", "") or "").strip(),
         "cli_account_sk": str(value.get("cli_account_sk", "") or "").strip(),
         "cli_command": str(value.get("cli_command", "") or "").strip(),
         "cli_cwd": str(value.get("cli_cwd", "") or "").strip(),
+        "api_url": str(value.get("api_url", defaults.get(provider, "")) or defaults.get(provider, "")).strip(),
+        "api_key": str(value.get("api_key", "") or "").strip(),
+        "api_key_header": str(value.get("api_key_header", "Authorization") or "Authorization").strip(),
     }
 
 
 def connection_has_value(connection: dict[str, Any]) -> bool:
+    provider = connection.get("provider")
     mode = connection.get("mode")
-    if mode == "mcp_url":
-        return bool(connection.get("mcp_url"))
-    if mode == "cli_account":
-        return bool(connection.get("cli_account_sk"))
-    return bool(connection.get("cli_command"))
-
+    if provider == "sorftime":
+        if mode == "mcp_url":
+            return bool(connection.get("mcp_url"))
+        if mode == "cli_account":
+            return bool(connection.get("cli_account_sk"))
+        return bool(connection.get("cli_command"))
+    if provider == "sellersprite":
+        return bool(connection.get("api_key"))
+    if provider == "xiyou":
+        return bool(connection.get("mcp_url") and connection.get("mcp_token")) if mode == "mcp_url" else bool(connection.get("api_key"))
+    if provider == "sif":
+        return bool(connection.get("mcp_url") and connection.get("mcp_token"))
+    if provider == "custom":
+        return bool(connection.get("api_url")) if mode == "api" else bool(connection.get("mcp_url"))
+    return False
 
 def load_local_connection(owner_id: str) -> dict[str, Any] | None:
     if HOSTED_MODE:
@@ -233,12 +270,12 @@ def load_local_connection(owner_id: str) -> dict[str, Any] | None:
 
 def save_local_connection(owner_id: str, connection: dict[str, Any]) -> None:
     if HOSTED_MODE:
-        raise ValueError("Zeabur 模式不会保存 Sorftime URL、Key 或 CLI；连接仅用于当前请求")
+        raise ValueError("Zeabur 模式不会把数据源凭证保存为普通连接文件；连接仅用于当前请求或加密定时任务")
     if not sanitize_owner_id(owner_id):
-        raise ValueError("浏览器任务标识无效，无法在本机保存 Sorftime 连接")
+        raise ValueError("浏览器任务标识无效，无法在本机保存数据源连接")
     normalized = normalize_connection(connection)
     if not connection_has_value(normalized):
-        raise ValueError("Sorftime 连接信息为空")
+        raise ValueError("数据源连接信息为空")
     path = connection_path(owner_id)
     write_json_atomic(path, normalized)
     try:
@@ -258,16 +295,20 @@ def clear_local_connection(owner_id: str) -> None:
 def mask_connection(connection: dict[str, Any] | None) -> str:
     if not connection:
         return "未保存"
-    if connection.get("mode") == "mcp_url":
+    label = provider_label(connection)
+    mode = connection.get("mode")
+    if mode == "mcp_url":
         url = str(connection.get("mcp_url", ""))
         base = re.sub(r"([?&](?:key|token|api_key)=)[^&]+", r"\1••••••", url, flags=re.I)
-        return base[:120]
-    if connection.get("mode") == "cli_account":
+        return f"{label} MCP · {base[:100]}"
+    if mode == "api":
+        url = str(connection.get("api_url", ""))
+        return f"{label} API · {url[:100]}"
+    if mode == "cli_account":
         value = str(connection.get("cli_account_sk", ""))
-        return f"CLI Account-SK ·••••{value[-4:]}" if value else "CLI Account-SK"
+        return f"Sorftime CLI ·••••{value[-4:]}" if value else "Sorftime CLI"
     command = str(connection.get("cli_command", ""))
     return (command[:90] + "…") if len(command) > 90 else command
-
 
 def default_download_dir() -> Path:
     downloads = Path.home() / "Downloads"
@@ -395,11 +436,11 @@ def make_workbook(records: list[dict[str, Any]], stats: dict[str, Any]) -> bytes
     summary_rows = [
         ["指标", "数值"],
         ["记录数", len(records)],
-        ["Sorftime接口调用总次数", stats.get("mcp_calls", 0)],
+        ["数据接口调用总次数", stats.get("mcp_calls", 0)],
         ["运行时间（秒）", stats.get("elapsed_seconds", 0)],
         ["生成时间", now_local().isoformat(timespec="seconds")],
         [],
-        ["Sorftime接口", "调用次数", "耗时（秒）"],
+        ["数据接口", "调用次数", "耗时（秒）"],
     ]
     summary.append(summary_rows[0])
     for row in summary_rows[1:]:
@@ -550,6 +591,50 @@ def first_form_field(form: SimpleForm, *names: str) -> Any | None:
     return None
 
 
+def connection_from_form(form: SimpleForm) -> dict[str, Any]:
+    provider = (form.getfirst("data_provider", "sorftime") or "sorftime").strip().lower()
+    if provider == "sorftime":
+        return normalize_connection({
+            "provider": provider,
+            "mode": form.getfirst("sorftime_mode", "cli_account"),
+            "mcp_url": form.getfirst("sorftime_mcp_url"),
+            "mcp_token": form.getfirst("sorftime_mcp_token"),
+            "cli_account_sk": form.getfirst("sorftime_cli_account_sk"),
+            "cli_command": form.getfirst("sorftime_cli_command"),
+            "cli_cwd": form.getfirst("sorftime_cli_cwd"),
+        })
+    if provider == "sellersprite":
+        return normalize_connection({
+            "provider": provider, "mode": "api",
+            "api_url": form.getfirst("sellersprite_api_url", "https://api.sellersprite.com"),
+            "api_key": form.getfirst("sellersprite_api_key"),
+        })
+    if provider == "sif":
+        return normalize_connection({
+            "provider": provider, "mode": "mcp_url",
+            "mcp_url": form.getfirst("sif_mcp_url", "https://mcp.sif.com/mcp"),
+            "mcp_token": form.getfirst("sif_mcp_token"),
+        })
+    if provider == "xiyou":
+        return normalize_connection({
+            "provider": provider,
+            "mode": form.getfirst("xiyou_mode", "mcp_url"),
+            "mcp_url": form.getfirst("xiyou_mcp_url", "https://mcp.xydc.com/mcp"),
+            "mcp_token": form.getfirst("xiyou_mcp_token"),
+            "api_url": form.getfirst("xiyou_api_url", "https://openapi.xydc.com"),
+            "api_key": form.getfirst("xiyou_api_key"),
+        })
+    return normalize_connection({
+        "provider": "custom",
+        "mode": form.getfirst("custom_mode", "mcp_url"),
+        "mcp_url": form.getfirst("custom_mcp_url"),
+        "mcp_token": form.getfirst("custom_mcp_token"),
+        "api_url": form.getfirst("custom_api_url"),
+        "api_key": form.getfirst("custom_api_key"),
+        "api_key_header": form.getfirst("custom_api_key_header", "Authorization"),
+    })
+
+
 def parse_capture_form(form: SimpleForm) -> dict[str, Any]:
     asins = parse_text_items(form.getfirst("asins_text") or form.getfirst("asinText"), True)
     keywords = parse_text_items(form.getfirst("keywords_text") or form.getfirst("keywordText"))
@@ -570,14 +655,7 @@ def parse_capture_form(form: SimpleForm) -> dict[str, Any]:
         "timezone": form.getfirst("timezone", DEFAULT_TIMEZONE) or DEFAULT_TIMEZONE,
         "download_dir": form.getfirst("download_dir").strip(),
         "remember_connection": form.getfirst("remember_connection", "on") in {"on", "true", "1", "yes"},
-        "connection": {
-            "mode": form.getfirst("sorftime_mode", "cli_account") or "cli_account",
-            "mcp_url": form.getfirst("sorftime_mcp_url").strip(),
-            "mcp_token": form.getfirst("sorftime_mcp_token").strip(),
-            "cli_account_sk": form.getfirst("sorftime_cli_account_sk").strip(),
-            "cli_command": form.getfirst("sorftime_cli_command").strip(),
-            "cli_cwd": form.getfirst("sorftime_cli_cwd").strip(),
-        },
+        "connection": connection_from_form(form),
         "lark": {
             "feishu_app_id": form.getfirst("feishu_app_id").strip(),
             "feishu_app_secret": form.getfirst("feishu_app_secret").strip(),
@@ -614,15 +692,17 @@ def validate_payload(payload: dict[str, Any], require_inputs: bool = True) -> No
 def resolve_payload_connection(payload: dict[str, Any], *, for_daily: bool = False) -> dict[str, Any]:
     owner_id = payload.get("owner_id", "")
     entered = normalize_connection(payload.get("connection"))
+    label = provider_label(entered)
 
     if HOSTED_MODE:
         if not connection_has_value(entered):
-            raise ValueError("请选择 CLI 或 MCP，并填写 Sorftime 连接信息")
+            raise ValueError(f"请选择并填写{label}连接信息")
         if entered.get("mode") == "mcp_url":
-            validate_hosted_mcp_url(entered.get("mcp_url", ""))
+            validate_hosted_data_url(entered.get("mcp_url", ""), f"{label} MCP")
+        elif entered.get("mode") == "api":
+            validate_hosted_data_url(entered.get("api_url", ""), f"{label} API")
         elif entered.get("mode") == "mcp_stdio":
-            raise ValueError("Zeabur 不接受任意命令。请选择 CLI Account-SK 或 MCP URL")
-        # Hosted daily jobs persist the current connection encrypted in /app/data.
+            raise ValueError("Zeabur 不接受任意命令；请使用 Sorftime CLI、公开 MCP 或 API")
         payload["connection"] = entered
         payload["remember_connection"] = False
         payload["download_dir"] = ""
@@ -634,16 +714,14 @@ def resolve_payload_connection(payload: dict[str, Any], *, for_daily: bool = Fal
         connection = entered
         if payload.get("remember_connection", True):
             save_local_connection(owner_id, connection)
-    elif saved and saved.get("mode") == entered.get("mode"):
+    elif saved and saved.get("provider") == entered.get("provider") and saved.get("mode") == entered.get("mode"):
         connection = saved
     else:
-        label = "Sorftime MCP URL" if entered.get("mode") == "mcp_url" else "Sorftime CLI Account-SK"
-        raise ValueError(f"请先填写或测试并保存{label}")
+        raise ValueError(f"请先填写或测试并保存{label}连接信息")
     payload["connection"] = connection
     payload["download_dir"] = str(resolve_download_dir(payload.get("download_dir")))
     payload["_prepared"] = True
     return payload
-
 
 def sanitize_payload_for_disk(payload: dict[str, Any]) -> dict[str, Any]:
     clean = json.loads(json.dumps(payload, ensure_ascii=False))
@@ -652,12 +730,11 @@ def sanitize_payload_for_disk(payload: dict[str, Any]) -> dict[str, Any]:
     lark["feishu_app_secret"] = ""
     connection = normalize_connection(clean.get("connection"))
     clean["connection"] = {
+        "provider": connection.get("provider", "sorftime"),
         "mode": connection.get("mode", "cli_account"),
-        "mcp_url": "",
-        "mcp_token": "",
-        "cli_account_sk": "",
-        "cli_command": "",
-        "cli_cwd": "",
+        "mcp_url": "", "mcp_token": "", "cli_account_sk": "",
+        "cli_command": "", "cli_cwd": "", "api_url": "",
+        "api_key": "", "api_key_header": connection.get("api_key_header", "Authorization"),
         "saved_locally": not HOSTED_MODE,
     }
     return clean
@@ -758,6 +835,7 @@ def save_daily_job(payload: dict[str, Any]) -> dict[str, Any]:
             "keyword_count": len(schedule_payload.get("keywords", [])),
             "marketplace": schedule_payload.get("marketplace", "US"),
             "delivery": schedule_payload.get("delivery", "excel"),
+            "data_provider": (schedule_payload.get("connection") or {}).get("provider", "sorftime"),
             "connection_mode": (schedule_payload.get("connection") or {}).get("mode", ""),
         },
         "encrypted_payload": encrypt_daily_payload(schedule_payload) if enabled else "",
@@ -778,7 +856,7 @@ def save_daily_job(payload: dict[str, Any]) -> dict[str, Any]:
 
 def run_capture_records(payload: dict[str, Any], progress: Any | None = None):
     validate_payload(payload)
-    client = build_sorftime_client(payload.get("connection"))
+    client = build_data_client(payload.get("connection"))
     records: list[dict[str, Any]] = []
     capture_time = now_local(payload.get("timezone"))
     total = len(payload["asins"]) * len(payload["keywords"])
@@ -895,7 +973,7 @@ def run_capture_job(job_id: str, payload: dict[str, Any]) -> None:
             "finished_at": now_local().isoformat(timespec="seconds"),
             "records": records,
         })
-        append_job_log(job, f"完成：{len(records)} 条，Sorftime 接口 {job['mcp_calls']} 次，用时 {job['elapsed_seconds']} 秒。")
+        append_job_log(job, f"完成：{len(records)} 条，数据接口 {job['mcp_calls']} 次，用时 {job['elapsed_seconds']} 秒。")
         write_json_atomic(job_path(job_id), job)
     except Exception as exc:
         job.update({
@@ -1069,6 +1147,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({
                 "ok": True,
                 "saved": bool(saved),
+                "provider": (saved or {}).get("provider", "sorftime"),
                 "mode": (saved or {}).get("mode", "cli_account"),
                 "summary": mask_connection(saved),
                 "download_dir": "" if HOSTED_MODE else str(default_download_dir()),
@@ -1092,24 +1171,20 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/connection/test":
                 form = form_from_request(self)
                 owner_id = sanitize_owner_id(form.getfirst("owner_id"))
-                connection = normalize_connection({
-                    "mode": form.getfirst("sorftime_mode", "cli_account"),
-                    "mcp_url": form.getfirst("sorftime_mcp_url"),
-                    "mcp_token": form.getfirst("sorftime_mcp_token"),
-                    "cli_account_sk": form.getfirst("sorftime_cli_account_sk"),
-                    "cli_command": form.getfirst("sorftime_cli_command"),
-                    "cli_cwd": form.getfirst("sorftime_cli_cwd"),
-                })
+                connection = connection_from_form(form)
+                label = provider_label(connection)
                 if HOSTED_MODE:
                     if connection.get("mode") == "mcp_url":
-                        validate_hosted_mcp_url(connection.get("mcp_url", ""))
+                        validate_hosted_data_url(connection.get("mcp_url", ""), f"{label} MCP")
+                    elif connection.get("mode") == "api":
+                        validate_hosted_data_url(connection.get("api_url", ""), f"{label} API")
                     elif connection.get("mode") == "mcp_stdio":
-                        raise ValueError("Zeabur 不接受任意命令。请选择 CLI Account-SK 或 MCP URL")
+                        raise ValueError("Zeabur 不接受任意命令；请使用 Sorftime CLI、公开 MCP 或 API")
                 elif not connection_has_value(connection):
                     saved = load_local_connection(owner_id)
-                    if saved and saved.get("mode") == connection.get("mode"):
+                    if saved and saved.get("provider") == connection.get("provider") and saved.get("mode") == connection.get("mode"):
                         connection = saved
-                result = test_sorftime_connection(connection)
+                result = test_data_connection(connection)
                 remember = (not HOSTED_MODE) and form.getfirst("remember_connection", "on") in {"on", "true", "1", "yes"}
                 if remember:
                     save_local_connection(owner_id, connection)

@@ -482,6 +482,11 @@ class SorftimeMcpClient:
         self._post({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
         self._initialized = True
 
+    def _auth_headers(self) -> dict[str, str]:
+        if not self.token:
+            return {}
+        return {"Authorization": self.token if self.token.lower().startswith("bearer ") else f"Bearer {self.token}"}
+
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         retryable_http = {429, 500, 502, 503, 504}
         last_error: Exception | None = None
@@ -493,8 +498,7 @@ class SorftimeMcpClient:
             }
             if self._session_id:
                 headers["Mcp-Session-Id"] = self._session_id
-            if self.token:
-                headers["Authorization"] = self.token if self.token.lower().startswith("bearer ") else f"Bearer {self.token}"
+            headers.update(self._auth_headers())
             request = urllib.request.Request(
                 self.url,
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -1617,7 +1621,7 @@ def amazon_product_url(asin: str, site: str) -> str:
 
 KEYWORD_KEYS = {
     "关键词", "keyword", "Keyword", "searchTerm", "SearchTerm", "keywordName",
-    "KeywordName", "searchKeyword", "SearchKeyword", "keywordText", "KeywordText",
+    "KeywordName", "searchKeyword", "SearchKeyword", "keywordText", "KeywordText", "keywords", "Keywords",
 }
 ASIN_KEYS = {"ASIN", "asin", "Asin", "parentAsin", "childAsin"}
 POSITION_KEYS = {
@@ -1705,7 +1709,7 @@ RANK_KEYS = {
     "产品排名", "大类排名", "rank", "bsr", "BSR", "productRank", "categoryRank",
     "subcategorySalesVolumeRank", "bestSellerRank", "CategoryRank", "SalesRank",
     "BestSellerRank", "parentCategoryRank",
-    "bigCategoryRank", "BigCategoryRank", "rankingOfCategory", "categoryBsrRank",
+    "bigCategoryRank", "BigCategoryRank", "rankingOfCategory", "categoryBsrRank", "bsrRank", "BsrRank",
     "MainCategoryRank", "mainCategoryRank", "RootCategoryRank", "rootCategoryRank",
     "SalesRankOfCategory", "salesRankOfCategory", "AmazonBestSellerRank", "amazonBestSellerRank",
 }

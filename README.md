@@ -1,147 +1,127 @@
-# Amazon 关键词监控工具 by kong
+# Amazon 关键词监控工具 by kong · V6.1 西柚洞察 MCP 版
 
-一个部署在 Zeabur 的 Amazon 关键词监控网页工具。每位使用者在页面自行选择 Sorftime **CLI** 或 **MCP**，输入 ASIN 和关键词后抓取数据，并选择：
+部署在 Zeabur 的 Amazon 关键词监控工具。用户先选择数据源，再输入自己的 MCP / CLI / API 凭证、ASIN 和关键词，结果可下载 Excel、写入飞书，或同时输出。
 
-- 下载 Excel
-- 写入飞书 Base
-- 下载 Excel + 写入飞书
+## 支持的数据源
 
-## 本版修复
+| 页面选项 | 连接方式 | 页面需要填写 |
+|---|---|---|
+| Sorftime | Sorftime CLI / Sorftime MCP | Account-SK，或 MCP URL + Token |
+| 卖家精灵 | API | API Key；API Base URL 默认已填写 |
+| SIF | MCP | MCP URL + MCP Key |
+| 西柚洞察 | MCP（默认）/ OpenAPI V2 | MCP URL + Token，或 API Key |
+| 其他软件 | 自定义 MCP / API | MCP URL + Token，或 API Endpoint + Key/Header |
 
-- 修复实时 MCP schema 使用 `amz_site` / `keyword_support_site` 时站点参数被丢弃、导致全部字段空白的问题。
-- Sorftime 普通文本参数错误会直接显示，不再误报为“未返回匹配数据”。
-- MCP 临时 SSL EOF、429、500、502、503、504 增加最多 3 次自动重试。
-- 飞书字段接口 403 时，自动跳过字段创建并尝试写入已有同名字段。
-
-- 修复 MCP `product_detail` 被错误路由到 `tiktok_product_detail` 的问题。
-- MCP 工具匹配会优先选择精确 Amazon 工具，并排除 TikTok、Temu、Shopee、Walmart 等平台前缀。
-- 修复 CLI/MCP 切换后隐藏字段仍显示、输入框高度和边框不一致的问题。
-- 工具名称统一为 **Amazon 关键词监控工具 by kong**。
-- 增加 Excel、飞书、Excel + 飞书三种输出方式。
-- 飞书只需输入 App ID、App Secret、Base 链接；工具可解析 Wiki/Base 链接、自动选择数据表并创建缺失字段。
-- 保留 Sorftime 接口次数、运行时间、进度、结果预览和 Excel 任务汇总。
+选择不同软件时，页面只显示该软件的连接输入框。原来的“CLI / MCP”已明确改名为 **Sorftime CLI / Sorftime MCP**。
 
 ## 使用步骤
 
-1. 选择 `CLI（Account-SK）` 或 `MCP（URL + Token）`。
-2. 点击“测试连接”。
-3. 输入一个或多个 ASIN、关键词。
+1. 在 STEP 1 选择数据源。
+2. 填写该数据源的 MCP、CLI 或 API 凭证并测试连接。
+3. 输入 ASIN 和关键词；关键词示例仅使用 `关键词1`、`关键词2`、`关键词3`。
 4. 选择 Amazon 站点。
-5. 选择输出方式。
-6. 需要飞书时，填写 App ID、App Secret 和 Base 数据表链接。
+5. 选择下载 Excel、写入飞书，或两者同时执行。
+6. 保持“每日 09:00 自动抓取（北京时间）”勾选，可保存当前数据源和任务配置。
 7. 点击“开始抓取”。
 
-## MCP 与 CLI 怎么选
+## 各数据源字段组合
 
-当前 17 字段监控默认推荐 MCP：
+### Sorftime
 
-```text
-product_traffic_terms
-keyword_detail
-keyword_search_results（自然 positionType=0 / 广告 positionType=2）
-product_ranking_trend_by_keyword
-product_detail
-product_report
-product_trend
+保留现有严格指标映射：
+
+- 流量占比：`product_traffic_terms`
+- ABA热度、搜索量：`keyword_detail`
+- 自然位、广告位：`keyword_search_results`，自然位再用关键词排名趋势兜底
+- 价格、优惠券、秒杀价、Prime价、月销量、大类排名、评分、评价数：`product_detail`，月销量/排名按 `product_trend` 兜底
+
+### 卖家精灵 API
+
+- 反查流量词：`/v1/traffic/keyword`
+- ABA与搜索量：`/v1/aba/research`
+- 产品详情：`/v1/asin/{marketplace}/{asin}`
+- 月销量兜底：`/v1/product/competitor-lookup`
+
+### SIF MCP
+
+程序调用 `tools/list`，按工具名称、描述和实时 `inputSchema` 自动识别：流量词、关键词详情、产品详情、排名和销量工具。SIF 后续修改命名空间时，无需在页面重新填写接口名。
+
+### 西柚洞察 MCP / OpenAPI V2
+
+MCP 为页面默认方式：
+
+- MCP URL：`https://mcp.xydc.com/mcp`
+- 鉴权：`Authorization: Bearer <MCP Token>`
+- 程序通过 `initialize → tools/list → tools/call` 连接，并优先识别西柚的 ASIN 关键词、关键词详情、ASIN详情、关键词排名、订单趋势和 BSR 趋势工具。
+- 工具名称变化时，继续使用实时 `tools/list` 和 `inputSchema` 动态匹配。
+
+OpenAPI V2 仍可在页面切换使用：
+
+- 反查关键词与流量占比：`/v1/asins/research/list/period`
+- ABA与搜索量：`/v1/searchTerms/info`
+- 产品详情：`/v1/asins/info`
+- 30日订单/月销量：`/v1/asins/orders`
+- BSR趋势：`/v1/asins/bsrInfo/trends/daily`
+
+### 其他软件
+
+- 自定义 MCP：读取 `tools/list` 并动态匹配 Amazon ASIN/关键词工具。
+- 自定义 API：对 Endpoint 发送 JSON POST：
+
+```json
+{
+  "asin": "B0XXXXXXXX",
+  "keyword": "关键词1",
+  "marketplace": "US"
+}
 ```
 
-CLI 更适合大量批量采集，当前使用：
+返回字段可使用常见英文或中文名称，例如 `trafficShare`、`searchFrequencyRank`、`searchVolume`、`organicPosition`、`price`、`monthlySales`、`bsrRank`、`rating`、`reviewCount`。
+
+## 飞书与 Excel
+
+- 飞书输入：App ID、App Secret、Base 链接。
+- 支持读取目标字段类型并转换，避免 `TextFieldConvFail`。
+- 支持 Excel、飞书、Excel + 飞书三种输出方式。
+- Excel“任务汇总”页显示数据接口总调用次数、各接口次数和耗时。
+
+## 每日 09:00 自动抓取
+
+- 固定北京时间 `Asia/Shanghai` 09:00。
+- 会保存当前 ASIN、关键词、站点、数据源、输出方式与飞书配置。
+- MCP/API/CLI 与飞书凭证会加密保存，不写入普通任务 JSON。
+- Zeabur 必须挂载持久化卷：
 
 ```text
-ASINRequestKeywordv2
-KeywordRequest
-ProductRequest
+/app/data
 ```
-
-完整字段对应见：
-
-```text
-MCP_CLI_FIELD_MAPPING.md
-Amazon关键词监控_MCP_CLI字段对应表_by_kong.xlsx
-```
-
-## 飞书配置
-
-企业自建应用至少需要开通多维表格读取/写入相关权限，并把应用添加为目标 Base 的协作者。页面填写：
-
-```text
-App ID
-App Secret
-Base 链接（建议复制到具体数据表，链接中包含 table=tbl...）
-```
-
-工具会：
-
-1. 获取 tenant_access_token。
-2. 如果粘贴的是 Wiki 链接，解析为 Base app_token。
-3. 如果链接不含 table_id，选择 Base 中第一张表。
-4. 检查字段并创建缺失字段。若字段接口返回 403，会自动跳过字段管理并尝试写入已有同名字段。
-5. 每批最多 500 条写入。
-
-App Secret 不会写入任务 JSON。
 
 ## Zeabur 部署
 
-把项目文件放到 GitHub 仓库根目录，确保存在：
+将项目文件直接覆盖 GitHub 仓库根目录，确认至少存在：
 
 ```text
 Dockerfile
 app.py
+provider_adapter.py
 sorftime_adapter.py
 lark_writer.py
 requirements.txt
 static/
 ```
 
-Zeabur 不需要手动设置 `APP_MODE`、`HOST`、`PORT` 或 `python app.py` 变量。Dockerfile 会启动应用，Zeabur 自动注入 `PORT`。
-
-健康检查：
+Zeabur 不需要手动创建 `PORT`、`HOST`、`APP_MODE` 或 `python app.py` 变量。部署后检查：
 
 ```text
 https://你的域名/api/health
 ```
-
-## 输出字段
-
-```text
-日期、ASIN、关键词、流量占比、ABA热度、搜索量、自然位、广告位、价格、优惠券、秒杀价、Prime价、月销量、大类排名、评分、评价数、链接
-```
-
-活动相关字段只有在 Sorftime 实际返回时才会写入；没有数据时保持空白并在备注中说明，不生成虚假值。
 
 ## 测试
 
 ```bash
 python -m unittest discover -s tests -v
 node --check static/app.js
-python -m py_compile app.py sorftime_adapter.py lark_writer.py
+python -m py_compile app.py provider_adapter.py sorftime_adapter.py lark_writer.py
 ```
 
-## 飞书 403 与 MCP 空白排查
-
-- 飞书 403：App ID/Secret 并不等于文档权限。请开通 `bitable:app`、发布审批，并把应用加入目标 Base 协作者；高级权限 Base 还要给应用所在角色读写权限。
-- MCP 全字段空白：新版已支持 MCP `structuredContent`、代码块 JSON、实时 inputSchema 参数适配和字段别名解析。若账户次数不足或套餐无接口权限，会直接显示实际错误。
-- 详细说明见 `V3_FIX_NOTES.md`、`FIX_NOTES.md` 与 `FEISHU_PERMISSION_CHECKLIST.md`。
-
-## V4：飞书字段转换与固定指标来源
-
-- 修复飞书 `TextFieldConvFail`：按目标 Base 字段类型转换后写入。
-- 流量占比只取 `product_traffic_terms`。
-- ABA热度、搜索量只取 `keyword_detail`。
-- 月销量只按 `product_detail → product_trend(SalesVolume)`。
-- 大类排名只按 `product_detail → product_trend(Rank/Ranking)`。
-- 不再使用 `product_report` 填充以上指标。
-
-详见 `V4_FIX_NOTES.md`。
-
-## V5：每日 09:00 自动抓取
-
-- 页面默认勾选每日自动抓取，固定使用北京时间 `Asia/Shanghai` 的 `09:00`。
-- 第一次点击“开始抓取”后，会保存当时的 ASIN、关键词、站点、连接方式和输出设置。
-- 支持定时生成 Excel、写入飞书，或两者同时执行。浏览器关闭不影响后台任务；下次打开页面可下载最近一次定时 Excel。
-- Sorftime Token / Account-SK 与飞书 App Secret 会整体加密后存放，不写入普通任务 JSON。
-- 页面会显示最近一次定时执行时间、错误和 Excel 下载链接。
-
-**Zeabur 必须在 Volumes 中挂载持久化卷到 `/app/data`。** 没有持久化卷时，重新部署可能丢失定时配置和加密密钥。
-
-关闭定时：取消勾选“每日 09:00 自动抓取”，再点击一次“开始抓取”。
+V6.1 使用模拟响应测试不同软件的字段解析、请求参数、客户端分发、凭证脱敏，以及西柚洞察 MCP 工具优先匹配；未把任何真实 Token 写入项目文件。

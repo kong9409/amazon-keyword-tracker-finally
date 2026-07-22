@@ -49,12 +49,79 @@
     return payload;
   }
 
-  function showConnectionFields() {
+  const providerLabels = {
+    sorftime: "Sorftime",
+    sellersprite: "卖家精灵",
+    sif: "SIF",
+    xiyou: "西柚洞察",
+    custom: "其他软件"
+  };
+
+  function selectedProvider() {
+    return $("dataProvider").value;
+  }
+
+  function selectedProviderLabel() {
+    return providerLabels[selectedProvider()] || "其他软件";
+  }
+
+  function showSorftimeModeFields() {
     const isMcp = $("sorftimeMode").value === "mcp_url";
     $("cliAccountField").hidden = isMcp;
     $("mcpUrlField").hidden = !isMcp;
     $("mcpTokenField").hidden = !isMcp;
-    setConnectionState("disconnected", isMcp ? "填写 MCP URL 和 Token" : "填写 Sorftime Account-SK");
+    $("sorftimeCliAccountSk").required = !isMcp && selectedProvider() === "sorftime";
+    $("sorftimeMcpUrl").required = isMcp && selectedProvider() === "sorftime";
+  }
+
+  function showXiyouModeFields() {
+    const isApi = $("xiyouMode").value === "api";
+    $("xiyouMcpUrlField").hidden = isApi;
+    $("xiyouMcpTokenField").hidden = isApi;
+    $("xiyouApiKeyField").hidden = !isApi;
+    $("xiyouApiUrlField").hidden = !isApi;
+    const selected = selectedProvider() === "xiyou";
+    $("xiyouMcpUrl").required = selected && !isApi;
+    $("xiyouMcpToken").required = selected && !isApi;
+    $("xiyouApiKey").required = selected && isApi;
+  }
+
+  function showCustomModeFields() {
+    const isApi = $("customMode").value === "api";
+    $("customMcpUrlField").hidden = isApi;
+    $("customMcpTokenField").hidden = isApi;
+    $("customApiUrlField").hidden = !isApi;
+    $("customApiKeyField").hidden = !isApi;
+    $("customApiHeaderField").hidden = !isApi;
+    $("customMcpUrl").required = selectedProvider() === "custom" && !isApi;
+    $("customApiUrl").required = selectedProvider() === "custom" && isApi;
+  }
+
+  function showConnectionFields() {
+    const provider = selectedProvider();
+    const sections = {
+      sorftime: "sorftimeFields",
+      sellersprite: "sellerSpriteFields",
+      sif: "sifFields",
+      xiyou: "xiyouFields",
+      custom: "customFields"
+    };
+    Object.entries(sections).forEach(([key, id]) => { $(id).hidden = key !== provider; });
+    showSorftimeModeFields();
+    showXiyouModeFields();
+    showCustomModeFields();
+
+    $("sellerSpriteApiKey").required = provider === "sellersprite";
+    $("sifMcpUrl").required = provider === "sif";
+    $("sifMcpToken").required = provider === "sif";
+
+    let detail = "填写连接信息后可直接测试或开始抓取";
+    if (provider === "sorftime") detail = $("sorftimeMode").value === "mcp_url" ? "填写 Sorftime MCP URL 和 Token" : "填写 Sorftime CLI Account-SK";
+    if (provider === "sellersprite") detail = "填写卖家精灵开放 API Key";
+    if (provider === "sif") detail = "填写 SIF MCP URL 和 MCP Key";
+    if (provider === "xiyou") detail = $("xiyouMode").value === "api" ? "填写西柚洞察 OpenAPI Key" : "填写西柚洞察 MCP URL 和 Token";
+    if (provider === "custom") detail = $("customMode").value === "api" ? "填写其他软件 API Endpoint" : "填写其他软件 MCP URL";
+    setConnectionState("disconnected", detail);
   }
 
   function showOutputFields() {
@@ -83,19 +150,16 @@
   function setConnectionState(state, detail) {
     const connected = state === "connected";
     const testing = state === "testing";
-    sourceBadge.textContent = connected ? "Sorftime 已连接" : (testing ? "正在测试连接" : "Sorftime 未连接");
+    const label = selectedProviderLabel();
+    sourceBadge.textContent = connected ? `${label} 已连接` : (testing ? `正在测试 ${label}` : `${label} 未连接`);
     sourceBadge.className = `source-pill ${connected ? "source-on" : (testing ? "source-testing" : "source-off")}`;
     $("connectionStatus").textContent = detail || "";
     $("connectionStatus").className = `connection-status ${connected ? "connection-ok" : ""}`;
   }
 
   function connectionFormData() {
-    const data = new FormData();
+    const data = new FormData(form);
     data.set("owner_id", ownerId);
-    data.set("sorftime_mode", $("sorftimeMode").value);
-    data.set("sorftime_cli_account_sk", $("sorftimeCliAccountSk").value.trim());
-    data.set("sorftime_mcp_url", $("sorftimeMcpUrl").value.trim());
-    data.set("sorftime_mcp_token", $("sorftimeMcpToken").value.trim());
     data.set("remember_connection", "false");
     return data;
   }
@@ -115,15 +179,17 @@
   async function testConnection() {
     const button = $("testConnection");
     button.disabled = true;
-    const cliMode = $("sorftimeMode").value === "cli_account";
-    setConnectionState("testing", cliMode ? "正在验证 Account-SK…" : "正在初始化 MCP…");
+    const provider = selectedProvider();
+    const isApi = provider === "sellersprite" || (provider === "xiyou" && $("xiyouMode").value === "api") || (provider === "custom" && $("customMode").value === "api");
+    const isCli = provider === "sorftime" && $("sorftimeMode").value === "cli_account";
+    setConnectionState("testing", isCli ? "正在验证 Sorftime Account-SK…" : (isApi ? "正在检查 API 配置…" : "正在初始化 MCP…"));
     try {
       const payload = await api("/api/connection/test", { method: "POST", body: connectionFormData() });
       const info = payload.connection || {};
-      const source = info.source === "sorftime_cli" ? "CLI" : "MCP";
       const count = Array.isArray(info.recognized_tools) ? info.recognized_tools.length : Number(info.tool_count || 0);
-      setConnectionState("connected", `工具连接成功：${source}，识别接口 ${count} 个；数据权限将在抓取时验证，用时 ${Number(info.elapsed_seconds || 0).toFixed(2)} 秒`);
-      toast("Sorftime 工具连接成功，数据权限将在抓取时验证");
+      const note = info.note ? `；${info.note}` : "；数据权限将在抓取时验证";
+      setConnectionState("connected", `连接配置有效，识别接口 ${count} 个${note}，用时 ${Number(info.elapsed_seconds || 0).toFixed(2)} 秒`);
+      toast(`${selectedProviderLabel()} 连接检查通过`);
     } catch (error) {
       setConnectionState("disconnected", error.message);
       toast(error.message, true);
@@ -151,7 +217,7 @@
     const percent = Number(job.percent || 0);
     $("progressTitle").textContent = statusText;
     const larkMessage = job.lark && job.lark.message ? job.lark.message : "";
-    $("progressSub").textContent = job.error || larkMessage || (["completed", "completed_with_warning"].includes(job.status) ? "结果已生成。" : "正在调用 Sorftime Amazon 数据接口。");
+    $("progressSub").textContent = job.error || larkMessage || (["completed", "completed_with_warning"].includes(job.status) ? "结果已生成。" : "正在调用所选数据源的 Amazon 数据接口。");
     $("progressPct").textContent = `${percent}%`;
     $("progressFill").style.width = `${Math.max(0, Math.min(100, percent))}%`;
     $("mcpCalls").textContent = String(job.mcp_calls || 0);
@@ -212,8 +278,9 @@
     }
     if (!dailyControlTouched) $("dailyEnabled").checked = Boolean(job.enabled);
     const summary = job.payload_summary || {};
+    const providerName = providerLabels[summary.data_provider] || "数据源";
     const scope = summary.asin_count && summary.keyword_count
-      ? `${summary.asin_count} 个 ASIN × ${summary.keyword_count} 个关键词 · ${summary.marketplace || "US"}`
+      ? `${providerName} · ${summary.asin_count} 个 ASIN × ${summary.keyword_count} 个关键词 · ${summary.marketplace || "US"}`
       : "";
     if (!job.enabled) {
       status.textContent = "每日定时抓取已关闭。勾选后再次点击“开始抓取”即可开启。";
@@ -300,7 +367,10 @@
   });
 
   $("testConnection").addEventListener("click", testConnection);
+  $("dataProvider").addEventListener("change", showConnectionFields);
   $("sorftimeMode").addEventListener("change", showConnectionFields);
+  $("xiyouMode").addEventListener("change", showConnectionFields);
+  $("customMode").addEventListener("change", showConnectionFields);
   $("outputMode").addEventListener("change", showOutputFields);
   $("dailyEnabled").addEventListener("change", () => { dailyControlTouched = true; });
   $("refreshHistory").addEventListener("click", () => loadHistory(true));

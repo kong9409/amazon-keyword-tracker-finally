@@ -139,3 +139,18 @@ tbody tr:hover { background: #eaf8f7; }
 .daily-links a { display: inline-flex; padding: 7px 10px; border-radius: 9px; background: #dff7f5; font-weight: 800; font-size: 13px; }
 .daily-error { color: #a33b13 !important; }
 @media (max-width: 820px) { .schedule-row { grid-template-columns: 1fr; } }
+
+/* V6 multi-source provider selector */
+.provider-grid { grid-template-columns: minmax(230px, .85fr) minmax(0, 3.15fr); align-items: stretch; }
+.provider-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; min-width: 0; }
+.provider-fields .setting-card { height: 100%; }
+.provider-fields .flex-two { grid-column: span 2; }
+.provider-grid > .span-three { grid-column: auto; }
+@media (max-width: 1080px) {
+  .provider-grid { grid-template-columns: 1fr; }
+  .provider-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .provider-fields { grid-template-columns: 1fr; }
+  .provider-fields .flex-two { grid-column: auto; }
+}

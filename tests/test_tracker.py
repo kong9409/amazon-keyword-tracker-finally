@@ -40,7 +40,7 @@ class FakeSorftimeClient(SorftimeMcpClient):
             self._tool_seconds[name] += time.perf_counter() - started
 
         if name == "product_traffic_terms":
-            return {"data": [{"keyword": "under bed storage", "trafficShare": "12.5%"}]}
+            return {"data": [{"keyword": "关键词1", "trafficShare": "12.5%"}]}
         if name == "keyword_detail":
             return {"data": {"keyword": arguments["keyword"], "searchFrequencyRank": 321, "searchVolume": 12345}}
         if name == "keyword_search_results" and arguments["positionType"] == 0:
@@ -100,10 +100,10 @@ class TrackerTests(unittest.TestCase):
         }
         args = adapt_tool_arguments(
             "keyword_search_results",
-            {"keyword": "shower door", "keywordSupportSite": "US", "page": 2, "positionType": 0},
+            {"keyword": "关键词1", "keywordSupportSite": "US", "page": 2, "positionType": 0},
             schema,
         )
-        self.assertEqual(args, {"keyword": "shower door", "amzSite": "US", "pageIndex": 2, "position_type": 0})
+        self.assertEqual(args, {"keyword": "关键词1", "amzSite": "US", "pageIndex": 2, "position_type": 0})
 
     def test_mcp_arguments_support_live_snake_case_site_names(self) -> None:
         product_schema = {
@@ -127,17 +127,17 @@ class TrackerTests(unittest.TestCase):
         }
         keyword_args = adapt_tool_arguments(
             "keyword_detail",
-            {"keyword": "shower door", "keywordSupportSite": "US"},
+            {"keyword": "关键词1", "keywordSupportSite": "US"},
             keyword_schema,
         )
         self.assertEqual(
             keyword_args,
-            {"keyword": "shower door", "keyword_support_site": "US"},
+            {"keyword": "关键词1", "keyword_support_site": "US"},
         )
 
         rank_args = adapt_tool_arguments(
             "product_ranking_trend_by_keyword",
-            {"asin": "B0DT499THF", "keyword": "shower door", "marketplace": "US"},
+            {"asin": "B0DT499THF", "keyword": "关键词1", "marketplace": "US"},
             {
                 "type": "object",
                 "properties": {"asin": {}, "keyword": {}, "amz_site": {}},
@@ -302,7 +302,7 @@ class TrackerTests(unittest.TestCase):
     def test_output_mode_requires_feishu_configuration(self) -> None:
         payload = {
             "asins": ["B000000001"],
-            "keywords": ["shower door"],
+            "keywords": ["关键词1"],
             "run_time": "09:00",
             "delivery": "lark",
             "lark": {"feishu_app_id": "", "feishu_app_secret": "", "base_url": ""},
@@ -328,9 +328,9 @@ class TrackerTests(unittest.TestCase):
             def call_tool(self, name, arguments):
                 self.seen.append((name, dict(arguments)))
                 if name == "product_traffic_terms":
-                    return {"Data": [{"KeywordName": "shower door", "TrafficRate": "8.8%"}]}
+                    return {"Data": [{"KeywordName": "关键词1", "TrafficRate": "8.8%"}]}
                 if name == "keyword_detail":
-                    return {"Data": {"keyword": "shower door", "Rank": 456, "monthlySearchVolume": 9999}}
+                    return {"Data": {"keyword": "关键词1", "Rank": 456, "monthlySearchVolume": 9999}}
                 if name == "keyword_search_results":
                     if arguments["positionType"] == 0:
                         return {"Data": [{"asin": "B000000001", "position": 6}]}
@@ -353,7 +353,7 @@ class TrackerTests(unittest.TestCase):
                 raise AssertionError((name, arguments))
 
         client = StrictSourceClient()
-        result = client.capture_keyword("B000000001", "shower door", "US")
+        result = client.capture_keyword("B000000001", "关键词1", "US")
         self.assertEqual(result["traffic_share"], "8.8%")
         self.assertEqual(result["aba_rank"], 456)
         self.assertEqual(result["search_volume"], 9999)
@@ -368,8 +368,8 @@ class TrackerTests(unittest.TestCase):
 
     def test_field_fallbacks_and_cache_reduce_calls(self) -> None:
         client = FakeSorftimeClient()
-        first = client.capture_keyword("B000000001", "under bed storage", "US")
-        second = client.capture_keyword("B000000002", "under bed storage", "US")
+        first = client.capture_keyword("B000000001", "关键词1", "US")
+        second = client.capture_keyword("B000000002", "关键词1", "US")
 
         self.assertEqual(first["traffic_share"], "12.5%")
         self.assertEqual(first["aba_rank"], 321)
@@ -409,7 +409,7 @@ class TrackerTests(unittest.TestCase):
                 "elif args[0]=='api':\n"
                 "    endpoint=args[1]\n"
                 "    if endpoint=='ASINRequestKeywordv2':\n"
-                "        data=[{'keyword':'under bed storage','trafficShare':'12.5%','searchFrequencyRank':321,'searchVolume':12345,'organicPosition':4,'adPosition':2}]\n"
+                "        data=[{'keyword':'关键词1','trafficShare':'12.5%','searchFrequencyRank':321,'searchVolume':12345,'organicPosition':4,'adPosition':2}]\n"
                 "    elif endpoint=='ProductRequest':\n"
                 "        data={'price':29.99,'coupon':'$5 off','dealPrice':25.99,'primePrice':27.99,'monthlySales':600,'BSR':1000,'rating':4.6,'reviewCount':800}\n"
                 "    else:\n"
@@ -424,7 +424,7 @@ class TrackerTests(unittest.TestCase):
             try:
                 client = SorftimeCliClient("ACCOUNT-SK-SECRET")
                 ready = client.check_ready()
-                result = client.capture_keyword("B000000001", "under bed storage", "US")
+                result = client.capture_keyword("B000000001", "关键词1", "US")
                 stats = client.stats()
                 client.close()
             finally:
@@ -445,7 +445,7 @@ class TrackerTests(unittest.TestCase):
         record.update({
             "date": "2026-07-21",
             "asin": "B000000001",
-            "keyword": "under bed storage",
+            "keyword": "关键词1",
             "traffic_share": "12.5%",
             "status": "ok",
         })
@@ -514,7 +514,7 @@ class TrackerTests(unittest.TestCase):
                     "connection": {"mode": "mcp_url", "mcp_url": "https://mcp.sorftime.com/", "mcp_token": "SECRET-TOKEN"},
                     "lark": {"feishu_app_secret": "SECRET-LARK"},
                     "asins": ["B000000001"],
-                    "keywords": ["shower door"],
+                    "keywords": ["关键词1"],
                 }
                 token = app.encrypt_daily_payload(payload)
                 self.assertNotIn("SECRET-TOKEN", token)
@@ -540,7 +540,7 @@ class TrackerTests(unittest.TestCase):
                 payload = {
                     "owner_id": "browser_1234567890abcdef",
                     "asins": ["B000000001"],
-                    "keywords": ["shower door"],
+                    "keywords": ["关键词1"],
                     "marketplace": "US",
                     "delivery": "excel",
                     "daily_enabled": True,
@@ -585,7 +585,7 @@ class TrackerTests(unittest.TestCase):
                 payload = {
                     "owner_id": owner,
                     "asins": ["B000000001"],
-                    "keywords": ["shower door"],
+                    "keywords": ["关键词1"],
                     "marketplace": "US",
                     "delivery": "excel",
                     "daily_enabled": True,
@@ -605,7 +605,7 @@ class TrackerTests(unittest.TestCase):
                 }
                 app.write_json_atomic(app.daily_path(owner), config)
                 fixed_now = datetime(2026, 7, 22, 9, 1, tzinfo=ZoneInfo("Asia/Shanghai"))
-                records = [{"owner_id": owner, "asin": "B000000001", "keyword": "shower door"}]
+                records = [{"owner_id": owner, "asin": "B000000001", "keyword": "关键词1"}]
                 stats = {"mcp_calls": 3, "elapsed_seconds": 1.2, "tool_calls": {}, "tool_seconds": {}}
                 with patch("app.now_local", return_value=fixed_now), \
                      patch("app.run_capture_records", return_value=(records, stats)) as run_mock, \

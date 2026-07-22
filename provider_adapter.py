@@ -1,0 +1,977 @@
+from __future__ import annotations
+
+import json
+import re
+import threading
+import time
+import urllib.error
+import urllib.request
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from typing import Any, Protocol
+
+from sorftime_adapter import (
+    ABA_RANK_KEYS,
+    AD_POSITION_KEYS,
+    ASIN_KEYS,
+    EMPTY,
+    ORGANIC_POSITION_KEYS,
+    POSITION_KEYS,
+    PRICE_KEYS,
+    RANK_KEYS,
+    RATING_KEYS,
+    REVIEW_KEYS,
+    SALES_KEYS,
+    SEARCH_VOLUME_KEYS,
+    TRAFFIC_SHARE_KEYS,
+    VALUE_KEYS,
+    SorftimeMcpClient,
+    amazon_product_url,
+    classify_coupon,
+    collect_dict_rows,
+    deep_parse_json,
+    find_keyword_row,
+    find_value,
+    first_non_empty,
+    normalize_decimal,
+    normalize_keyword,
+    normalize_marketplace,
+    normalize_money,
+    normalize_number,
+    normalize_percent,
+    normalize_position,
+    normalize_yes_no,
+    parse_product_detail,
+    parse_tool_result,
+    row_keyword,
+    scalar_rank,
+    unwrap_response_envelope,
+    build_sorftime_client,
+    test_sorftime_connection,
+)
+
+
+PROVIDER_LABELS = {
+    "sorftime": "Sorftime",
+    "sellersprite": "卖家精灵",
+    "sif": "SIF",
+    "xiyou": "西柚洞察",
+    "custom": "其他软件",
+}
+
+
+class DataClient(Protocol):
+    source_name: str
+
+    def capture_keyword(self, asin: str, keyword: str, marketplace: str) -> dict[str, Any]: ...
+    def stats(self) -> dict[str, Any]: ...
+    def check_ready(self) -> dict[str, Any]: ...
+    def close(self) -> None: ...
+
+
+def provider_label(connection: dict[str, Any] | None) -> str:
+    provider = str((connection or {}).get("provider") or "sorftime").lower()
+    return PROVIDER_LABELS.get(provider, "其他软件")
+
+
+def _blank_result() -> dict[str, Any]:
+    return {
+        "keyword_rank": "", "organic_position": "", "organic_time": "",
+        "ad_position": "", "ad_time": "", "traffic_share": "",
+        "aba_rank": "", "search_volume": "", "price": "",
+        "coupon_type": "", "coupon_value": "", "deal_status": "否",
+        "deal_price": "", "prime_discount_price": "", "estimated_sales": "",
+        "product_rank": "", "rating": "", "review_count": "", "product_url": "",
+    }
+
+
+def _finish_result(
+    *,
+    provider: str,
+    asin: str,
+    site: str,
+    raw: dict[str, Any],
+    traffic_share: Any = "",
+    aba_rank: Any = "",
+    search_volume: Any = "",
+    organic_position: Any = "",
+    ad_position: Any = "",
+    price: Any = "",
+    coupon_value: Any = "",
+    deal_price: Any = "",
+    prime_price: Any = "",
+    sales: Any = "",
+    product_rank: Any = "",
+    rating: Any = "",
+    review_count: Any = "",
+    product_url: Any = "",
+    organic_time: Any = "",
+    ad_time: Any = "",
+) -> dict[str, Any]:
+    values = {
+        "流量占比": traffic_share,
+        "ABA热度": aba_rank,
+        "搜索量": search_volume,
+        "自然位": organic_position,
+        "广告位": ad_position,
+        "价格": price,
+        "月销量": sales,
+        "大类排名": product_rank,
+        "评分": rating,
+        "评价数": review_count,
+    }
+    found_any = any(value not in EMPTY for value in values.values())
+    missing = [label for label, value in values.items() if value in EMPTY]
+    status = "ok" if found_any and not missing else ("partial" if found_any else "not_found")
+    message = "" if not missing else f"{provider} 未返回：" + "、".join(missing)
+    if not found_any:
+        errors = []
+        for key, value in raw.items():
+            if key.endswith("_error") and value:
+                errors.append(f"{key.removesuffix('_error')}：{value}")
+        if errors:
+            message += "；" + "；".join(errors[:4])
+    return {
+        **_blank_result(),
+        "keyword_rank": first_non_empty(organic_position, ad_position),
+        "organic_position": normalize_position(organic_position),
+        "organic_time": organic_time,
+        "ad_position": normalize_position(ad_position),
+        "ad_time": ad_time,
+        "traffic_share": normalize_percent(traffic_share),
+        "aba_rank": normalize_number(aba_rank),
+        "search_volume": normalize_number(search_volume),
+        "price": normalize_money(price),
+        "coupon_type": classify_coupon(coupon_value),
+        "coupon_value": coupon_value,
+        "deal_status": normalize_yes_no("", bool(deal_price)),
+        "deal_price": normalize_money(deal_price),
+        "prime_discount_price": normalize_money(prime_price),
+        "estimated_sales": normalize_number(sales),
+        "product_rank": normalize_number(scalar_rank(product_rank)),
+        "rating": normalize_decimal(rating),
+        "review_count": normalize_number(review_count),
+        "product_url": product_url or amazon_product_url(asin, site),
+        "status": status,
+        "message": message,
+        "raw": raw,
+    }
+
+
+def _percent_value(value: Any) -> Any:
+    """Convert documented 0..1 ratios to a readable percentage string."""
+    if value in EMPTY:
+        return ""
+    if isinstance(value, str) and "%" in value:
+        return value
+    number = normalize_number(value)
+    if isinstance(number, (int, float)) and 0 <= number <= 1:
+        return f"{round(number * 100, 6):g}%"
+    return value
+
+
+def _position_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return first_non_empty(value.get("position"), value.get("totalRank"), value.get("rank"), value.get("index"))
+    return value
+
+
+class BaseApiClient:
+    source_name = "api"
+    provider_name = "API"
+
+    def __init__(self, base_url: str, api_key: str) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key.strip()
+        self.started_at = time.perf_counter()
+        self._calls = 0
+        self._tool_calls: Counter[str] = Counter()
+        self._tool_seconds: Counter[str] = Counter()
+        self._lock = threading.Lock()
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "mcp_calls": self._calls,
+                "elapsed_seconds": round(time.perf_counter() - self.started_at, 2),
+                "tool_calls": dict(sorted(self._tool_calls.items())),
+                "tool_seconds": {key: round(value, 2) for key, value in sorted(self._tool_seconds.items())},
+            }
+
+    def headers(self) -> dict[str, str]:
+        raise NotImplementedError
+
+    def _request(self, method: str, path: str, payload: Any = None, *, tool_name: str = "") -> Any:
+        url = path if re.match(r"^https?://", path, re.I) else f"{self.base_url}/{path.lstrip('/')}"
+        body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(url, data=body, headers=self.headers(), method=method.upper())
+        started = time.perf_counter()
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                text = response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:800]
+            raise RuntimeError(f"{self.provider_name} API HTTP {exc.code}：{detail or exc.reason}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"无法连接{self.provider_name} API：{exc.reason}") from exc
+        finally:
+            elapsed = time.perf_counter() - started
+            if tool_name:
+                with self._lock:
+                    self._calls += 1
+                    self._tool_calls[tool_name] += 1
+                    self._tool_seconds[tool_name] += elapsed
+        if not text.strip():
+            return {}
+        parsed = deep_parse_json(text)
+        return unwrap_response_envelope(parsed)
+
+    def close(self) -> None:
+        return
+
+
+class SellerSpriteApiClient(BaseApiClient):
+    source_name = "sellersprite_api"
+    provider_name = "卖家精灵"
+
+    def __init__(self, base_url: str, api_key: str) -> None:
+        if not api_key.strip():
+            raise ValueError("请填写卖家精灵 API Key")
+        super().__init__(base_url or "https://api.sellersprite.com", api_key)
+        self._traffic_cache: dict[tuple[str, str], Any] = {}
+        self._aba_cache: dict[tuple[str, str], Any] = {}
+        self._detail_cache: dict[tuple[str, str], Any] = {}
+        self._sales_cache: dict[tuple[str, str], Any] = {}
+
+    def headers(self) -> dict[str, str]:
+        return {"Content-Type": "application/json", "Accept": "application/json", "secret-key": self.api_key}
+
+    def check_ready(self) -> dict[str, Any]:
+        return {
+            "source": self.source_name,
+            "tool_count": 4,
+            "recognized_tools": ["reverse_asin", "aba_research", "asin_detail", "competitor_lookup"],
+            "missing_tools": [],
+            "note": "API Key 已读取；为避免消耗额度，真实数据权限将在抓取时验证。",
+        }
+
+    def _traffic(self, asin: str, site: str) -> Any:
+        key = (asin, site)
+        if key not in self._traffic_cache:
+            payload = {"marketplace": site, "asin": asin, "page": 1, "size": 1000}
+            self._traffic_cache[key] = self._request("POST", "/v1/traffic/keyword", payload, tool_name="traffic_keyword")
+        return self._traffic_cache[key]
+
+    def _aba(self, keyword: str, site: str) -> Any:
+        key = (keyword.casefold(), site)
+        if key not in self._aba_cache:
+            payload = {"marketplace": site, "keywordList": [keyword], "exactFlag": True, "reverseType": "M", "page": 1, "size": 50}
+            self._aba_cache[key] = self._request("POST", "/v1/aba/research", payload, tool_name="aba_research")
+        return self._aba_cache[key]
+
+    def _detail(self, asin: str, site: str) -> Any:
+        key = (asin, site)
+        if key not in self._detail_cache:
+            self._detail_cache[key] = self._request("GET", f"/v1/asin/{site}/{asin}", tool_name="asin_detail")
+        return self._detail_cache[key]
+
+    def _sales(self, asin: str, site: str) -> Any:
+        key = (asin, site)
+        if key not in self._sales_cache:
+            payload = {"marketplace": site, "asins": [asin], "page": 1, "size": 20}
+            self._sales_cache[key] = self._request("POST", "/v1/product/competitor-lookup", payload, tool_name="competitor_lookup")
+        return self._sales_cache[key]
+
+    def capture_keyword(self, asin: str, keyword: str, marketplace: str) -> dict[str, Any]:
+        site = normalize_marketplace(marketplace)
+        asin, keyword = asin.strip().upper(), keyword.strip()
+        raw: dict[str, Any] = {}
+        try:
+            traffic = self._traffic(asin, site)
+            raw["traffic_keyword"] = traffic
+            row = find_keyword_row(traffic, keyword)
+        except Exception as exc:
+            row = {}
+            raw["traffic_keyword_error"] = str(exc)
+        try:
+            aba = self._aba(keyword, site)
+            raw["aba_research"] = aba
+            aba_row = find_keyword_row(aba, keyword) or (collect_dict_rows(aba)[0] if collect_dict_rows(aba) else {})
+        except Exception as exc:
+            aba_row = {}
+            raw["aba_research_error"] = str(exc)
+        try:
+            detail = self._detail(asin, site)
+            raw["asin_detail"] = detail
+            product = parse_product_detail(detail)
+        except Exception as exc:
+            detail, product = {}, {}
+            raw["asin_detail_error"] = str(exc)
+        sales = product.get("estimated_sales", "")
+        if sales in EMPTY:
+            try:
+                sales_data = self._sales(asin, site)
+                raw["competitor_lookup"] = sales_data
+                sales = find_value(sales_data, SALES_KEYS | {"units", "monthlyUnits", "monthSales", "sales30Days"})
+            except Exception as exc:
+                raw["competitor_lookup_error"] = str(exc)
+        return _finish_result(
+            provider=self.provider_name, asin=asin, site=site, raw=raw,
+            traffic_share=_percent_value(find_value(row, TRAFFIC_SHARE_KEYS | {"trafficPercentage"})),
+            aba_rank=first_non_empty(find_value(aba_row, ABA_RANK_KEYS | {"searchRank", "searchesRank"}), find_value(row, {"searchesRank"})),
+            search_volume=first_non_empty(find_value(aba_row, SEARCH_VOLUME_KEYS | {"searches"}), find_value(row, {"searches"})),
+            organic_position=_position_value(find_value(row, ORGANIC_POSITION_KEYS | {"rankPosition"})),
+            ad_position=_position_value(find_value(row, AD_POSITION_KEYS | {"adPosition"})),
+            price=product.get("price", ""), coupon_value=product.get("coupon_value", ""),
+            deal_price=product.get("deal_price", ""), prime_price=product.get("prime_discount_price", ""),
+            sales=sales, product_rank=product.get("product_rank", ""), rating=product.get("rating", ""),
+            review_count=product.get("review_count", ""),
+        )
+
+
+class XiyouApiClient(BaseApiClient):
+    source_name = "xiyou_api"
+    provider_name = "西柚洞察"
+
+    def __init__(self, base_url: str, api_key: str) -> None:
+        if not api_key.strip():
+            raise ValueError("请填写西柚洞察 API Key")
+        super().__init__(base_url or "https://openapi.xydc.com", api_key)
+        self._reverse_cache: dict[tuple[str, str], Any] = {}
+        self._keyword_cache: dict[tuple[str, str], Any] = {}
+        self._detail_cache: dict[tuple[str, str], Any] = {}
+        self._orders_cache: dict[tuple[str, str], Any] = {}
+        self._bsr_cache: dict[tuple[str, str], Any] = {}
+
+    def headers(self) -> dict[str, str]:
+        return {
+            "Content-Type": "application/json", "Accept": "application/json",
+            "X-Auth-Version": "2.0", "X-Api-Key": self.api_key,
+        }
+
+    def check_ready(self) -> dict[str, Any]:
+        return {
+            "source": self.source_name,
+            "tool_count": 5,
+            "recognized_tools": ["reverse_asin", "keyword_info", "asin_info", "orders", "bsr_trend"],
+            "missing_tools": [],
+            "note": "API Key 已读取；为避免消耗额度，真实数据权限将在抓取时验证。",
+        }
+
+    def _reverse(self, asin: str, site: str) -> Any:
+        key = (asin, site)
+        if key not in self._reverse_cache:
+            payload = {"asin": asin, "country": site, "page": 1, "pageSize": 1000, "period": "last7days"}
+            self._reverse_cache[key] = self._request("POST", "/v1/asins/research/list/period", payload, tool_name="asins_research")
+        return self._reverse_cache[key]
+
+    def _keyword(self, keyword: str, site: str) -> Any:
+        key = (keyword.casefold(), site)
+        if key not in self._keyword_cache:
+            payload = {"country": site, "searchTerms": [keyword], "sort": {"field": "weeklySearchVolume", "order": "desc"}}
+            self._keyword_cache[key] = self._request("POST", "/v1/searchTerms/info", payload, tool_name="search_terms_info")
+        return self._keyword_cache[key]
+
+    def _detail(self, asin: str, site: str) -> Any:
+        key = (asin, site)
+        if key not in self._detail_cache:
+            payload = {"entities": [{"country": site, "asin": asin}]}
+            self._detail_cache[key] = self._request("POST", "/v1/asins/info", payload, tool_name="asins_info")
+        return self._detail_cache[key]
+
+    def _orders(self, asin: str, site: str) -> Any:
+        key = (asin, site)
+        if key not in self._orders_cache:
+            payload = {"country": site, "asins": [asin]}
+            self._orders_cache[key] = self._request("POST", "/v1/asins/orders", payload, tool_name="asins_orders")
+        return self._orders_cache[key]
+
+    def _bsr(self, asin: str, site: str) -> Any:
+        key = (asin, site)
+        if key not in self._bsr_cache:
+            end = datetime.now(timezone.utc).date()
+            start = end - timedelta(days=7)
+            payload = {"country": site, "asin": asin, "startDate": start.isoformat(), "endDate": end.isoformat()}
+            self._bsr_cache[key] = self._request("POST", "/v1/asins/bsrInfo/trends/daily", payload, tool_name="bsr_trend")
+        return self._bsr_cache[key]
+
+    @staticmethod
+    def _positions(row: dict[str, Any]) -> tuple[Any, Any]:
+        organic, ad = "", ""
+        ranks = row.get("ranks") if isinstance(row, dict) else None
+        if isinstance(ranks, list):
+            for item in ranks:
+                if not isinstance(item, dict):
+                    continue
+                kind = str(item.get("position") or item.get("type") or "").lower()
+                value = first_non_empty(item.get("totalRank"), item.get("rank"), item.get("positionRank"))
+                if kind in {"or", "organic"} and organic in EMPTY:
+                    organic = value
+                elif kind in {"sp", "ad", "sponsored"} and ad in EMPTY:
+                    ad = value
+        return organic, ad
+
+    @staticmethod
+    def _latest_root_bsr(payload: Any) -> Any:
+        """Return the latest root-category BSR from Xiyou's trend response."""
+        root_ids: set[str] = set()
+        trend_rows: list[dict[str, Any]] = []
+
+        def walk(value: Any) -> None:
+            if isinstance(value, list):
+                for item in value:
+                    walk(item)
+                return
+            if not isinstance(value, dict):
+                return
+            tree = value.get("categoryTree")
+            if isinstance(tree, list):
+                for item in tree:
+                    if not isinstance(item, dict) or not item.get("root"):
+                        continue
+                    category_id = first_non_empty(item.get("categoryId"), item.get("id"), item.get("nodeId"))
+                    if category_id not in EMPTY:
+                        root_ids.add(str(category_id))
+            trends = value.get("trends")
+            if isinstance(trends, list):
+                trend_rows.extend(item for item in trends if isinstance(item, dict))
+            for child in value.values():
+                if isinstance(child, (dict, list)):
+                    walk(child)
+
+        walk(payload)
+        candidates: list[tuple[str, Any, bool]] = []
+        for trend in trend_rows:
+            date_value = str(first_non_empty(trend.get("date"), trend.get("day"), trend.get("time"), ""))
+            values = trend.get("values")
+            if not isinstance(values, list):
+                continue
+            for value_row in values:
+                if not isinstance(value_row, dict):
+                    continue
+                rank = first_non_empty(value_row.get("rank"), value_row.get("bsrRank"), value_row.get("value"))
+                if rank in EMPTY:
+                    continue
+                category_id = first_non_empty(value_row.get("categoryId"), value_row.get("id"), value_row.get("nodeId"))
+                is_root = str(category_id) in root_ids if category_id not in EMPTY else False
+                candidates.append((date_value, rank, is_root))
+
+        if candidates:
+            selected = [item for item in candidates if item[2]] or candidates
+            selected.sort(key=lambda item: item[0], reverse=True)
+            return selected[0][1]
+        return find_value(payload, RANK_KEYS | {"bsrRank", "rootRank", "ranking"})
+
+    def capture_keyword(self, asin: str, keyword: str, marketplace: str) -> dict[str, Any]:
+        site = normalize_marketplace(marketplace)
+        asin, keyword = asin.strip().upper(), keyword.strip()
+        raw: dict[str, Any] = {}
+        try:
+            reverse = self._reverse(asin, site)
+            raw["asins_research"] = reverse
+            row = find_keyword_row(reverse, keyword)
+        except Exception as exc:
+            row = {}
+            raw["asins_research_error"] = str(exc)
+        try:
+            keyword_data = self._keyword(keyword, site)
+            raw["search_terms_info"] = keyword_data
+            keyword_row = find_keyword_row(keyword_data, keyword) or (collect_dict_rows(keyword_data)[0] if collect_dict_rows(keyword_data) else {})
+        except Exception as exc:
+            keyword_row = {}
+            raw["search_terms_info_error"] = str(exc)
+        try:
+            detail = self._detail(asin, site)
+            raw["asins_info"] = detail
+            product = parse_product_detail(detail)
+        except Exception as exc:
+            detail, product = {}, {}
+            raw["asins_info_error"] = str(exc)
+        try:
+            orders = self._orders(asin, site)
+            raw["asins_orders"] = orders
+        except Exception as exc:
+            orders = {}
+            raw["asins_orders_error"] = str(exc)
+        rank = product.get("product_rank", "")
+        if rank in EMPTY:
+            try:
+                bsr = self._bsr(asin, site)
+                raw["bsr_trend"] = bsr
+                rank = self._latest_root_bsr(bsr)
+            except Exception as exc:
+                raw["bsr_trend_error"] = str(exc)
+        organic, ad = self._positions(row)
+        traffic_share = find_value(row, TRAFFIC_SHARE_KEYS | {"trafficAcquisitionRate", "total"})
+        # Avoid a generic nested 'total' stealing unrelated values when the documented object exists.
+        summary = row.get("trafficSummary") if isinstance(row, dict) else None
+        if isinstance(summary, dict):
+            rate = summary.get("trafficAcquisitionRate")
+            if isinstance(rate, dict):
+                traffic_share = first_non_empty(rate.get("total"), traffic_share)
+        aba_report = keyword_row.get("abaReport") if isinstance(keyword_row, dict) else None
+        aba_rank = find_value(aba_report or keyword_row, ABA_RANK_KEYS | {"searchFrequencyRank"})
+        return _finish_result(
+            provider=self.provider_name, asin=asin, site=site, raw=raw,
+            traffic_share=_percent_value(traffic_share), aba_rank=aba_rank,
+            search_volume=find_value(keyword_row, SEARCH_VOLUME_KEYS | {"weeklySearchVolume"}),
+            organic_position=first_non_empty(organic, find_value(row, ORGANIC_POSITION_KEYS)),
+            ad_position=first_non_empty(ad, find_value(row, AD_POSITION_KEYS)),
+            price=first_non_empty(product.get("price", ""), find_value(detail, PRICE_KEYS)),
+            coupon_value=product.get("coupon_value", ""), deal_price=product.get("deal_price", ""),
+            prime_price=product.get("prime_discount_price", ""),
+            sales=find_value(orders, SALES_KEYS | {"orders", "orderCount"}), product_rank=rank,
+            rating=first_non_empty(product.get("rating", ""), find_value(detail, RATING_KEYS | {"stars"})),
+            review_count=first_non_empty(product.get("review_count", ""), find_value(detail, REVIEW_KEYS | {"ratings"})),
+            product_url=find_value(detail, {"amazonUrl", "url", "productUrl"}),
+        )
+
+
+class GenericMcpClient(SorftimeMcpClient):
+    """Dynamic MCP adapter for SIF and other Amazon data providers.
+
+    It discovers tools from tools/list and scores their name/description/input schema.
+    No provider-specific tool name is hard-coded, so upgrades remain compatible when
+    a provider keeps the same semantic inputs but changes namespaces.
+    """
+
+    def __init__(self, url: str, token: str, provider_name: str = "其他软件", source_name: str = "custom_mcp") -> None:
+        super().__init__(url, token)
+        self.provider_name = provider_name
+        self.source_name = source_name
+        self._generic_tools: list[dict[str, Any]] = []
+        self._generic_cache: dict[tuple[str, str, str, str], Any] = {}
+
+    def _auth_headers(self) -> dict[str, str]:
+        if not self.token:
+            return {}
+        bearer = self.token if self.token.lower().startswith("bearer ") else f"Bearer {self.token}"
+        # Common MCP/API-key conventions. Servers ignore headers they do not use,
+        # while this avoids forcing users to understand provider-specific naming.
+        return {"Authorization": bearer, "X-API-Key": self.token, "MCP-Key": self.token}
+
+    def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return super()._post(payload)
+        except Exception as exc:
+            raise RuntimeError(str(exc).replace("Sorftime MCP", f"{self.provider_name} MCP")) from exc
+
+    def list_tools(self) -> list[str]:
+        self._ensure_initialized()
+        response = self._post({"jsonrpc": "2.0", "id": int(time.time() * 1000), "method": "tools/list", "params": {}})
+        if "error" in response:
+            error = response.get("error") or {}
+            raise RuntimeError(error.get("message") or f"{self.provider_name} MCP tools/list failed")
+        tools = response.get("result", {}).get("tools", []) or []
+        self._generic_tools = [item for item in tools if isinstance(item, dict) and item.get("name")]
+        return [str(item.get("name")) for item in self._generic_tools]
+
+    def check_ready(self) -> dict[str, Any]:
+        names = self.list_tools()
+        if not names:
+            raise RuntimeError(f"{self.provider_name} MCP 已连接，但 tools/list 没有返回工具")
+        recognized = []
+        for kind in ("traffic", "keyword", "product", "ranking", "sales"):
+            tool = self._select_tool(kind)
+            if tool:
+                recognized.append(str(tool.get("name")))
+        if not recognized:
+            raise RuntimeError(f"{self.provider_name} MCP 已连接，但没有识别到 Amazon ASIN/关键词数据工具")
+        return {"source": self.source_name, "tool_count": len(names), "recognized_tools": sorted(set(recognized)), "missing_tools": []}
+
+    def _select_tool(self, kind: str) -> dict[str, Any] | None:
+        weighted = {
+            "traffic": (("asin", 5), ("keyword", 3), ("关键词", 3), ("traffic", 6), ("流量", 6), ("reverse", 5), ("反查", 5), ("term", 2)),
+            "keyword": (("keyword", 6), ("关键词", 6), ("搜索词", 5), ("detail", 4), ("info", 3), ("search", 3), ("market", 2), ("aba", 5), ("搜索量", 5)),
+            "product": (("asin", 4), ("product", 5), ("产品", 5), ("商品", 4), ("detail", 5), ("详情", 5), ("info", 3)),
+            "ranking": (("rank", 7), ("排名", 7), ("位置", 5), ("asin", 3), ("keyword", 3), ("关键词", 3), ("trend", 2), ("趋势", 2)),
+            "sales": (("sales", 7), ("销量", 7), ("volume", 5), ("order", 5), ("订单", 5), ("asin", 3)),
+        }[kind]
+        best: tuple[int, dict[str, Any]] | None = None
+        for tool in self._generic_tools:
+            schema = tool.get("inputSchema") or tool.get("input_schema") or {}
+            blob = " ".join([str(tool.get("name") or ""), str(tool.get("description") or ""), json.dumps(schema, ensure_ascii=False)]).lower()
+            score = sum(weight for token, weight in weighted if token in blob)
+            # Discourage non-Amazon namespaces.
+            if any(token in blob for token in ("tiktok", "temu", "shopee", "walmart", "ebay")):
+                score -= 50
+            if best is None or score > best[0]:
+                best = (score, tool)
+        return best[1] if best and best[0] >= 7 else None
+
+    @staticmethod
+    def _schema_arguments(tool: dict[str, Any], asin: str, keyword: str, site: str) -> dict[str, Any]:
+        schema = tool.get("inputSchema") or tool.get("input_schema") or {}
+        properties = schema.get("properties") if isinstance(schema, dict) else {}
+        properties = properties if isinstance(properties, dict) else {}
+        args: dict[str, Any] = {}
+        end_date = datetime.now(timezone.utc).date()
+        start_date = end_date - timedelta(days=30)
+        for name, prop in properties.items():
+            raw_name = str(name)
+            key = re.sub(r"[^a-z0-9]", "", raw_name.lower())
+            compact_cn = re.sub(r"[\s_\-]", "", raw_name)
+            prop_type = prop.get("type") if isinstance(prop, dict) else None
+            enum_values = prop.get("enum") if isinstance(prop, dict) else None
+            if key in {"asin", "productasin", "parentasin"} or compact_cn in {"产品asin", "商品asin"}:
+                args[name] = asin
+            elif key in {"asins", "asinlist", "products"} or compact_cn in {"asin列表", "产品列表"}:
+                args[name] = [asin]
+            elif key in {"keyword", "searchterm", "query", "term"} or compact_cn in {"关键词", "搜索词"}:
+                args[name] = keyword
+            elif key in {"keywords", "searchterms", "keywordlist"} or compact_cn in {"关键词列表", "搜索词列表"}:
+                args[name] = [keyword]
+            elif key in {"marketplace", "country", "site", "domain", "market", "amzsite", "keywordsupportsite"} or compact_cn in {"站点", "国家", "市场"}:
+                candidate = site
+                if isinstance(enum_values, list) and enum_values:
+                    by_upper = {str(item).upper(): item for item in enum_values}
+                    candidate = by_upper.get(site.upper(), by_upper.get("UK" if site == "GB" else site.upper(), enum_values[0]))
+                args[name] = candidate
+            elif key in {"page", "pageindex", "pagenum"} or compact_cn in {"页码", "页数"}:
+                args[name] = 1
+            elif key in {"size", "pagesize", "limit"} or compact_cn in {"每页数量", "分页大小"}:
+                args[name] = 100
+            elif key in {"positiontype"}:
+                args[name] = 0
+            elif key in {"entities"}:
+                args[name] = [{"asin": asin, "country": site}]
+            elif key in {"startdate", "fromdate", "begindate", "starttime"} or compact_cn in {"开始日期", "起始日期"}:
+                args[name] = start_date.isoformat()
+            elif key in {"enddate", "todate", "finishdate", "endtime"} or compact_cn in {"结束日期", "截止日期"}:
+                args[name] = end_date.isoformat()
+            elif key in {"period", "daterange", "timerange"} or compact_cn in {"周期", "时间范围"}:
+                args[name] = enum_values[0] if isinstance(enum_values, list) and enum_values else "last30days"
+            elif prop_type == "boolean" and key in {"exact", "exactflag", "matchexact"}:
+                args[name] = True
+            elif isinstance(enum_values, list) and enum_values and name in (schema.get("required") or []):
+                args[name] = enum_values[0]
+        # Fallback for permissive schemas.
+        if not properties:
+            args = {"asin": asin, "keyword": keyword, "marketplace": site}
+        required = schema.get("required") if isinstance(schema, dict) else []
+        missing = [name for name in (required or []) if name not in args]
+        if missing:
+            raise RuntimeError(f"工具 {tool.get('name')} 缺少无法自动推断的必填参数：{'、'.join(map(str, missing))}")
+        return args
+
+    def _call_kind(self, kind: str, asin: str, keyword: str, site: str) -> Any:
+        key = (kind, asin, keyword.casefold(), site)
+        if key in self._generic_cache:
+            return self._generic_cache[key]
+        tool = self._select_tool(kind)
+        if not tool:
+            self._generic_cache[key] = {}
+            return {}
+        name = str(tool.get("name"))
+        args = self._schema_arguments(tool, asin, keyword, site)
+        started = time.perf_counter()
+        response = self._post({"jsonrpc": "2.0", "id": int(time.time() * 1000), "method": "tools/call", "params": {"name": name, "arguments": args}})
+        elapsed = time.perf_counter() - started
+        with self._lock:
+            self._mcp_calls += 1
+            self._tool_calls[name] += 1
+            self._tool_seconds[name] += elapsed
+        if "error" in response:
+            error = response.get("error") or {}
+            raise RuntimeError(str(error.get("message") or error.get("data") or f"{name} 调用失败"))
+        result = response.get("result", {})
+        if isinstance(result, dict) and result.get("isError"):
+            raise RuntimeError(str(parse_tool_result(result)))
+        parsed = parse_tool_result(result)
+        self._generic_cache[key] = parsed
+        return parsed
+
+    def capture_keyword(self, asin: str, keyword: str, marketplace: str) -> dict[str, Any]:
+        self._ensure_initialized()
+        if not self._generic_tools:
+            self.list_tools()
+        site = normalize_marketplace(marketplace)
+        asin, keyword = asin.strip().upper(), keyword.strip()
+        raw: dict[str, Any] = {}
+        data: dict[str, Any] = {}
+        for kind in ("traffic", "keyword", "product", "ranking", "sales"):
+            try:
+                data[kind] = self._call_kind(kind, asin, keyword, site)
+                raw[kind] = data[kind]
+            except Exception as exc:
+                data[kind] = {}
+                raw[f"{kind}_error"] = str(exc)
+        traffic_row = find_keyword_row(data["traffic"], keyword) or data["traffic"]
+        keyword_row = find_keyword_row(data["keyword"], keyword) or data["keyword"]
+        product = parse_product_detail(data["product"])
+        return _finish_result(
+            provider=self.provider_name, asin=asin, site=site, raw=raw,
+            traffic_share=find_value(traffic_row, TRAFFIC_SHARE_KEYS),
+            aba_rank=find_value(keyword_row, ABA_RANK_KEYS),
+            search_volume=find_value(keyword_row, SEARCH_VOLUME_KEYS),
+            organic_position=first_non_empty(find_value(traffic_row, ORGANIC_POSITION_KEYS), find_value(data["ranking"], ORGANIC_POSITION_KEYS | RANK_KEYS)),
+            ad_position=find_value(traffic_row, AD_POSITION_KEYS),
+            price=product.get("price", ""), coupon_value=product.get("coupon_value", ""),
+            deal_price=product.get("deal_price", ""), prime_price=product.get("prime_discount_price", ""),
+            sales=first_non_empty(product.get("estimated_sales", ""), find_value(data["sales"], SALES_KEYS | VALUE_KEYS)),
+            product_rank=first_non_empty(product.get("product_rank", ""), find_value(data["ranking"], RANK_KEYS)),
+            rating=product.get("rating", ""), review_count=product.get("review_count", ""),
+            product_url=find_value(data["product"], {"url", "productUrl", "amazonUrl"}),
+        )
+
+
+class XiyouMcpClient(GenericMcpClient):
+    """西柚洞察远程 MCP 适配器。
+
+    官方接入使用 Streamable HTTP URL + Authorization: Bearer Token。
+    工具名称优先按西柚公开命名匹配，同时保留动态 tools/list 兜底，
+    避免服务端新增命名空间后失效。
+    """
+
+    PREFERRED_TOOLS = {
+        "traffic": (
+            "get_asin_keywords",
+            "get_asin_keywords_monthly",
+            "get_asin_keyword_traffic_trends",
+            "get_asin_traffic",
+            "get_asin_traffic_trends",
+        ),
+        "keyword": (
+            "get_keyword_info",
+            "get_keyword_analysis_monthly",
+            "get_keyword_aba_trends",
+            "get_keyword_asin_analysis",
+        ),
+        "product": (
+            "get_asin_info",
+            "get_asin_variations",
+            "get_asin_info_trends",
+        ),
+        "ranking": (
+            "get_asin_keyword_rank_hourly",
+            "get_asin_keyword_rank_trends",
+        ),
+        "sales": (
+            "get_asin_order_trends",
+            "get_asin_info",
+        ),
+        "bsr": (
+            "get_asin_bsr_trends",
+            "get_asin_info",
+        ),
+    }
+
+    def __init__(self, url: str, token: str) -> None:
+        if not token.strip():
+            raise ValueError("请填写西柚洞察 MCP Token")
+        super().__init__(url or "https://mcp.xydc.com/mcp", token, provider_name="西柚洞察", source_name="xiyou_mcp")
+
+    def _auth_headers(self) -> dict[str, str]:
+        bearer = self.token if self.token.lower().startswith("bearer ") else f"Bearer {self.token}"
+        return {"Authorization": bearer}
+
+    def _select_tool(self, kind: str) -> dict[str, Any] | None:
+        preferred = self.PREFERRED_TOOLS.get(kind, ())
+        by_name = {str(tool.get("name") or "").strip().lower(): tool for tool in self._generic_tools}
+        for expected in preferred:
+            if expected in by_name:
+                return by_name[expected]
+            for actual_name, tool in by_name.items():
+                if actual_name.endswith("." + expected) or actual_name.endswith("/" + expected) or actual_name.endswith("_" + expected):
+                    return tool
+        if kind == "bsr":
+            candidates = []
+            for tool in self._generic_tools:
+                blob = " ".join([
+                    str(tool.get("name") or ""),
+                    str(tool.get("description") or ""),
+                    json.dumps(tool.get("inputSchema") or {}, ensure_ascii=False),
+                ]).lower()
+                score = sum(weight for token, weight in (("bsr", 10), ("类目排名", 10), ("asin", 3), ("rank", 4), ("趋势", 2), ("trend", 2)) if token in blob)
+                if score:
+                    candidates.append((score, tool))
+            return max(candidates, key=lambda item: item[0])[1] if candidates else None
+        return super()._select_tool(kind)
+
+    def _call_optional_kind(self, kind: str, asin: str, keyword: str, site: str) -> Any:
+        tool = self._select_tool(kind)
+        if not tool:
+            return {}
+        cache_kind = kind if kind in {"traffic", "keyword", "product", "ranking", "sales"} else f"xiyou_{kind}"
+        key = (cache_kind, asin, keyword.casefold(), site)
+        if key in self._generic_cache:
+            return self._generic_cache[key]
+        name = str(tool.get("name"))
+        args = self._schema_arguments(tool, asin, keyword, site)
+        started = time.perf_counter()
+        response = self._post({"jsonrpc": "2.0", "id": int(time.time() * 1000), "method": "tools/call", "params": {"name": name, "arguments": args}})
+        elapsed = time.perf_counter() - started
+        with self._lock:
+            self._mcp_calls += 1
+            self._tool_calls[name] += 1
+            self._tool_seconds[name] += elapsed
+        if "error" in response:
+            error = response.get("error") or {}
+            raise RuntimeError(str(error.get("message") or error.get("data") or f"{name} 调用失败"))
+        result = response.get("result", {})
+        if isinstance(result, dict) and result.get("isError"):
+            raise RuntimeError(str(parse_tool_result(result)))
+        parsed = parse_tool_result(result)
+        self._generic_cache[key] = parsed
+        return parsed
+
+    @staticmethod
+    def _traffic_share(payload: Any, keyword: str) -> Any:
+        row = find_keyword_row(payload, keyword) or payload
+        value = find_value(row, TRAFFIC_SHARE_KEYS | {"trafficAcquisitionRate", "trafficRateTotal"})
+        if isinstance(row, dict):
+            for container_key in ("trafficSummary", "traffic", "trafficInfo"):
+                container = row.get(container_key)
+                if not isinstance(container, dict):
+                    continue
+                rate = container.get("trafficAcquisitionRate")
+                if isinstance(rate, dict):
+                    value = first_non_empty(rate.get("total"), rate.get("all"), value)
+        return _percent_value(value)
+
+    def capture_keyword(self, asin: str, keyword: str, marketplace: str) -> dict[str, Any]:
+        self._ensure_initialized()
+        if not self._generic_tools:
+            self.list_tools()
+        site = normalize_marketplace(marketplace)
+        asin, keyword = asin.strip().upper(), keyword.strip()
+        raw: dict[str, Any] = {}
+        data: dict[str, Any] = {}
+        for kind in ("traffic", "keyword", "product", "ranking", "sales", "bsr"):
+            try:
+                data[kind] = self._call_optional_kind(kind, asin, keyword, site)
+                raw[kind] = data[kind]
+            except Exception as exc:
+                data[kind] = {}
+                raw[f"{kind}_error"] = str(exc)
+
+        traffic_row = find_keyword_row(data["traffic"], keyword) or data["traffic"]
+        keyword_row = find_keyword_row(data["keyword"], keyword) or data["keyword"]
+        product = parse_product_detail(data["product"])
+        positions = XiyouApiClient._positions(traffic_row if isinstance(traffic_row, dict) else {})
+        organic = first_non_empty(
+            positions[0],
+            find_value(traffic_row, ORGANIC_POSITION_KEYS),
+            find_value(data["ranking"], ORGANIC_POSITION_KEYS | POSITION_KEYS | RANK_KEYS),
+        )
+        ad = first_non_empty(positions[1], find_value(traffic_row, AD_POSITION_KEYS))
+        product_rank = first_non_empty(
+            product.get("product_rank", ""),
+            XiyouApiClient._latest_root_bsr(data["bsr"]),
+            find_value(data["bsr"], RANK_KEYS),
+        )
+        sales = first_non_empty(
+            product.get("estimated_sales", ""),
+            find_value(data["sales"], SALES_KEYS | {"orders", "orderCount", "orderVolume"} | VALUE_KEYS),
+        )
+        aba_container = keyword_row.get("abaReport") if isinstance(keyword_row, dict) else None
+        return _finish_result(
+            provider=self.provider_name, asin=asin, site=site, raw=raw,
+            traffic_share=self._traffic_share(data["traffic"], keyword),
+            aba_rank=find_value(aba_container or keyword_row, ABA_RANK_KEYS | {"searchFrequencyRank"}),
+            search_volume=find_value(keyword_row, SEARCH_VOLUME_KEYS | {"weeklySearchVolume"}),
+            organic_position=organic,
+            ad_position=ad,
+            price=first_non_empty(product.get("price", ""), find_value(data["product"], PRICE_KEYS)),
+            coupon_value=product.get("coupon_value", ""),
+            deal_price=product.get("deal_price", ""),
+            prime_price=product.get("prime_discount_price", ""),
+            sales=sales,
+            product_rank=product_rank,
+            rating=first_non_empty(product.get("rating", ""), find_value(data["product"], RATING_KEYS)),
+            review_count=first_non_empty(product.get("review_count", ""), find_value(data["product"], REVIEW_KEYS)),
+            product_url=find_value(data["product"], {"url", "productUrl", "amazonUrl"}),
+        )
+
+
+class GenericApiClient(BaseApiClient):
+    source_name = "custom_api"
+    provider_name = "其他软件"
+
+    def __init__(self, endpoint: str, api_key: str, header_name: str = "Authorization") -> None:
+        if not endpoint.strip():
+            raise ValueError("请填写其他软件 API Endpoint")
+        self.endpoint = endpoint.strip()
+        self.header_name = header_name.strip() or "Authorization"
+        super().__init__(self.endpoint, api_key)
+
+    def headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self.api_key:
+            value = self.api_key
+            if self.header_name.lower() == "authorization" and not value.lower().startswith(("bearer ", "basic ")):
+                value = f"Bearer {value}"
+            headers[self.header_name] = value
+        return headers
+
+    def check_ready(self) -> dict[str, Any]:
+        return {"source": self.source_name, "tool_count": 1, "recognized_tools": ["custom_endpoint"], "missing_tools": [], "note": "Endpoint 配置已读取；响应字段将在抓取时按通用字段名解析。"}
+
+    def capture_keyword(self, asin: str, keyword: str, marketplace: str) -> dict[str, Any]:
+        site = normalize_marketplace(marketplace)
+        asin, keyword = asin.strip().upper(), keyword.strip()
+        raw: dict[str, Any] = {}
+        try:
+            data = self._request("POST", self.endpoint, {"asin": asin, "keyword": keyword, "marketplace": site}, tool_name="custom_endpoint")
+            raw["custom_endpoint"] = data
+        except Exception as exc:
+            data = {}
+            raw["custom_endpoint_error"] = str(exc)
+        product = parse_product_detail(data)
+        keyword_row = find_keyword_row(data, keyword) or data
+        return _finish_result(
+            provider=self.provider_name, asin=asin, site=site, raw=raw,
+            traffic_share=find_value(keyword_row, TRAFFIC_SHARE_KEYS), aba_rank=find_value(keyword_row, ABA_RANK_KEYS),
+            search_volume=find_value(keyword_row, SEARCH_VOLUME_KEYS), organic_position=find_value(keyword_row, ORGANIC_POSITION_KEYS),
+            ad_position=find_value(keyword_row, AD_POSITION_KEYS), price=product.get("price", ""),
+            coupon_value=product.get("coupon_value", ""), deal_price=product.get("deal_price", ""),
+            prime_price=product.get("prime_discount_price", ""), sales=product.get("estimated_sales", ""),
+            product_rank=product.get("product_rank", ""), rating=product.get("rating", ""),
+            review_count=product.get("review_count", ""), product_url=find_value(data, {"url", "productUrl", "amazonUrl"}),
+        )
+
+
+def build_data_client(connection: dict[str, Any] | None = None) -> DataClient:
+    connection = connection or {}
+    provider = str(connection.get("provider") or "sorftime").lower()
+    mode = str(connection.get("mode") or "").lower()
+    if provider == "sorftime":
+        return build_sorftime_client(connection)
+    if provider == "sellersprite":
+        return SellerSpriteApiClient(str(connection.get("api_url") or "https://api.sellersprite.com"), str(connection.get("api_key") or ""))
+    if provider == "xiyou":
+        if mode == "mcp_url":
+            return XiyouMcpClient(
+                str(connection.get("mcp_url") or "https://mcp.xydc.com/mcp"),
+                str(connection.get("mcp_token") or ""),
+            )
+        return XiyouApiClient(str(connection.get("api_url") or "https://openapi.xydc.com"), str(connection.get("api_key") or ""))
+    if provider == "sif":
+        url = str(connection.get("mcp_url") or "https://mcp.sif.com/mcp")
+        token = str(connection.get("mcp_token") or "")
+        if not token.strip():
+            raise ValueError("请填写 SIF MCP Key")
+        return GenericMcpClient(url, token, provider_name="SIF", source_name="sif_mcp")
+    if provider == "custom":
+        if mode == "api":
+            return GenericApiClient(str(connection.get("api_url") or ""), str(connection.get("api_key") or ""), str(connection.get("api_key_header") or "Authorization"))
+        url = str(connection.get("mcp_url") or "")
+        if not url:
+            raise ValueError("请填写其他软件 MCP URL")
+        return GenericMcpClient(url, str(connection.get("mcp_token") or ""), provider_name="其他软件", source_name="custom_mcp")
+    raise ValueError("请选择有效的数据源")
+
+
+def test_data_connection(connection: dict[str, Any]) -> dict[str, Any]:
+    provider = str(connection.get("provider") or "sorftime").lower()
+    if provider == "sorftime":
+        return test_sorftime_connection(connection)
+    client = build_data_client(connection)
+    started = time.perf_counter()
+    try:
+        result = client.check_ready()
+        result["elapsed_seconds"] = round(time.perf_counter() - started, 2)
+        result["provider"] = provider
+        return result
+    finally:
+        client.close()
