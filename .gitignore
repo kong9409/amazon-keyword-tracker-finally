@@ -9,3 +9,5 @@ data/jobs/*.json
 data/daily_jobs/*.json
 data/local_connections/*.json
 exports/*.xlsx
+data/.scheduler.key
+data/exports/*.xlsx
